@@ -33,6 +33,12 @@
 - Inspection summary printed to terminal
 - State dict per plant: `{"row", "col", "pos", "healthy", "inspected"}`
 
+### Step 6 — Contact sensor + camera ✅
+- `ContactSensor` on `/World/G1/.*` — every G1 body link monitored; prints body name + force (throttled to 1 msg/s) when force > 5 N
+- `Camera` at `/World/G1/torso_link/insp_cam` — 640×480 RGB, 10 Hz, forward-facing (ros convention, +90° Y rotation)
+- Camera requires `--enable_cameras` flag; skipped gracefully without it
+- Camera logs frame shape every 300 frames to confirm data flow; tensor ready for YOLO passthrough
+
 ### Step 5 — G1 locomotion policy (pre-trained) ✅
 - `scripts/demos/g1_locomotion.py` — keyboard-controlled G1 using Nucleus checkpoint
 - **Key fixes discovered:**
@@ -49,9 +55,9 @@
 
 | Priority | Step | Description |
 |---|---|---|
-| 🔜 Next | **Contact sensor** | Attach `ContactSensorCfg` to G1 hand links — detect when robot touches a bush. Reference: `scripts/demos/sensors/contact_sensor.py` |
-| 🔜 Next | **RGB camera on head** | `CameraCfg` on head link, 640×480 @ 30 Hz, output as GPU tensor. Reference: `scripts/demos/sensors/cameras.py` |
-| 📋 Later | **Wire locomotion into greenhouse** | Replace kinematic glide in `greenhouse_sim.py` with the G1 policy from `g1_locomotion.py` — robot walks the aisle with real footsteps |
+| ✅ Done | **Contact sensor** | `ContactSensorCfg` on all G1 body links (`/World/G1/.*`) — prints body name + force when robot touches anything above 5 N |
+| ✅ Done | **RGB camera on torso** | `CameraCfg` at `/World/G1/torso_link/insp_cam` — 640×480 RGB, 10 Hz, forward-facing. Run with `--enable_cameras` |
+| 📋 Next | **Wire locomotion into greenhouse** | Replace kinematic glide in `greenhouse_sim.py` with the G1 policy from `g1_locomotion.py` — robot walks the aisle with real footsteps |
 | 📋 Later | **YOLO integration** | Pass `camera.data.output["rgb"]` tensor to `ultralytics` YOLO — detect unhealthy bushes, update `bush_states["healthy"]` |
 | 📋 Later | **VLA policy** | Vision-Language-Action model on top of locomotion — receives visual + language goal, outputs navigation commands |
 | 💡 Low priority | **Photorealistic bushes** | Replace sphere clusters with USD plant assets from Nucleus (`{NVIDIA_NUCLEUS_DIR}/Assets/Vegetation/`). Keep spheres during dev for fast iteration. |
@@ -96,8 +102,14 @@ If a new checkpoint is trained with current rsl_rl, use standard `OnPolicyRunner
 ## How to Run
 
 ```bash
-# Greenhouse inspection (kinematic walking)
-./isaaclab.sh -p scripts/greenhouse_sim.py
+# Greenhouse inspection — contact sensor + camera (GUI)
+./isaaclab.sh -p scripts/greenhouse_sim.py --enable_cameras
+
+# Greenhouse inspection — contact sensor only, headless
+./isaaclab.sh -p scripts/greenhouse_sim.py --headless
+
+# Greenhouse inspection — full sensors, headless
+./isaaclab.sh -p scripts/greenhouse_sim.py --headless --enable_cameras
 
 # G1 locomotion with keyboard control (GUI required)
 ./isaaclab.sh -p scripts/demos/g1_locomotion.py
