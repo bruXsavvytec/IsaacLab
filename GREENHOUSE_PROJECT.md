@@ -226,45 +226,52 @@ Outputs `Bush_local.usd` and `Blueberry_local.usd` next to the originals.
 
 ### Done ✅
 
-- [x] Greenhouse structure — 8×5×3 m box, glass walls (35% opacity), peaked roof (25°), corner pillars, floor
-- [x] G1 robot spawned in default standing pose (hip z=0.74 m)
-- [x] Understand why G1 falls (PD gains tuned for locomotion policy, not passive balance)
-- [x] Kinematic root control — `write_root_pose_to_sim()` + `write_root_velocity_to_sim()` every frame
-- [x] Kinematic joint control — `write_joint_state_to_sim()` holds default pose
-- [x] Bush assets discovered — local OBJ→USD files in forest generator repo
-- [x] Asset showcase tool — visual grid of all local USD plants
-- [x] Nucleus browser tool — CLI to list Nucleus directories
-- [x] OBJ→USD converter tool — fixes Windows texture paths
-- [x] Bush.usd spawned in scene (scale 1.0, confirmed visually good)
-- [x] Bush physics — kinematic rigid body + mesh collision applied post-spawn via `define_rigid_body_properties` + `define_collision_properties` (bush is solid, robot can't pass through)
-- [x] ContactSensor on all G1 body links — prints body name + force magnitude when contact > 5 N
-- [x] RGB Camera sensor on G1 torso_link — 640×480, ~10 Hz, GPU tensor (ROS convention, faces forward)
-- [x] Arm reach motion — `torch.lerp` between default and reach pose, smooth ramp in/out
-- [x] Single-bush interaction state machine — WALK → REACH_IN → INSIDE → REACH_OUT → DONE
-- [x] Glass walls commented out (not deleted) for clear dynamics view
-- [x] Scene simplified to one bush for debugging
+| # | Task | Notes |
+|---|---|---|
+| 1 | Greenhouse structure | 8×5×3 m box, glass walls (35% opacity), peaked roof (25°), corner pillars, sandy floor |
+| 2 | G1 robot in scene | Spawned at hip z=0.74 m in default standing pose |
+| 3 | Understand G1 fall | PD gains tuned for locomotion policy, not passive balance — documented with fix options |
+| 4 | Kinematic root control | `write_root_pose_to_sim()` + `write_root_velocity_to_sim(zeros)` every frame |
+| 5 | Kinematic joint control | `write_joint_state_to_sim()` freezes pose; `torch.lerp` for smooth arm motion |
+| 6 | Bush asset discovery | Local OBJ→USD files in forest generator repo at `~/dev-bru/…/models/` |
+| 7 | Asset showcase tool | `tools/asset_showcase.py` — visual grid of all local USD plants |
+| 8 | Nucleus browser tool | `tools/browse_nucleus.py` — headless CLI to list Nucleus directories |
+| 9 | OBJ→USD converter | `tools/convert_bush_assets.py` — fixes Windows texture paths in .mtl files |
+| 10 | ContactSensor on G1 | All body links monitored; prints link name + force (N) when contact > 5 N |
+| 11 | RGB Camera on torso | 640×480, ~10 Hz, GPU tensor, ROS convention, faces forward — enabled with `--enable_cameras` |
+| 12 | Arm reach motion | `torch.lerp` ramps joints between default and reach pose smoothly over 60 frames |
+| 13 | State machine | WALK → REACH_IN → INSIDE → REACH_OUT → DONE, clean phase transitions with terminal logs |
+| 14 | Glass walls hidden | Commented out (not deleted) — 3 lines to restore full enclosure |
+| 15 | Single-bush focus | Simplified to 1 bush for physics debugging |
+| 16 | **Interactive bush** ✨ | Procedural: kinematic trunk + 10 dynamic sphere clusters connected via `UsdPhysics.Joint` spring D6 joints — clusters deflect on contact and spring back (stiffness=15 N·m/rad, damping=3) |
+| 17 | GitHub repo | Pushed to `github.com/bruXsavvytec/IsaacLab`, SSH key configured on server |
 
 ### In Progress 🔄
 
-- [ ] **Verify visually:** run the sim and confirm the hand enters the bush (bush at Y=0.70, arm at 90° roll should reach ~0.84 m → comfortable contact)
-- [ ] **Verify contact sensor:** look for `[CONTACT] Robot body '...' touching something` in terminal during INSIDE phase
-- [ ] Add Blueberry.usd alongside Bush (user confirmed: scale always 5× the bush scale)
+- [ ] **Verify contact sensor** — check terminal for `[CONTACT] '...' touching cluster` during INSIDE phase; if silent, add `PhysxContactReportAPI` to clusters
+- [ ] **Tune arm angles** — confirm hand visually enters upper clusters (z≈0.95 m); adjust `left_shoulder_roll_joint` (currently 2.0 rad) if needed
 
 ### Next Up 📋
 
-- [ ] Re-enable glass walls once dynamics are validated
-- [ ] Restore multi-bush grid layout (2 rows × 6 plants)
-- [ ] Add per-plant health state (healthy/sick) visible via color or label
-- [ ] Integrate YOLO — pass `camera.data.output["rgb"]` tensor to `ultralytics` YOLO model
-- [ ] Find or train G1 locomotion checkpoint (reference: `h1_locomotion.py` for H1)
-- [ ] Replace kinematic walk with real locomotion policy
-- [ ] VLA model on top of locomotion for high-level planning
+**Scene completeness:**
+- [ ] Re-enable glass walls and roof once single-bush interaction is confirmed solid
+- [ ] Restore multi-bush grid — 2 rows × 6 plants, each fully interactive (same spring-joint setup)
+- [ ] Per-plant health state — each bush gets `{"healthy": bool, "inspected": bool}`; healthy = green clusters, sick = yellow/brown tint
 
-### Parallel / Background Tasks 📌
+**Vision:**
+- [ ] YOLO integration — pass `camera.data.output["rgb"]` (GPU tensor, shape `[1, 480, 640, 4]`) to `ultralytics` YOLO model; detect colour anomalies as proxy for plant disease
 
-- [ ] Investigate deformable body physics for individual leaf movement (requires rigged USD or PhysX deformable solver)
-- [ ] Run `convert_bush_assets.py` to get texture-correct `Bush_local.usd` (current `Bush.usd` uses Windows paths in `.mtl`, but binary USDC may already embed relative paths — test visually)
-- [ ] Check if Blueberry textures load correctly (same OBJ/MTL texture path issue)
+**Locomotion (new priority):**
+- [ ] **Find G1 locomotion checkpoint** — search `scripts/reinforcement_learning/` and Nucleus for a pre-trained G1 policy; reference implementation is `scripts/demos/h1_locomotion.py` (H1 version)
+- [ ] **Wire up G1 walking policy** — replace kinematic root glide with policy network: load checkpoint → observe IMU + joint state → output joint targets at 50 Hz → robot walks naturally
+- [ ] **Integrate policy with state machine** — policy runs during WALK phase; switch to arm-reach control when robot arrives at inspection position
+- [ ] **VLA model** (future) — Vision-Language-Action model for high-level task planning on top of the locomotion policy
+
+### Parallel / Background 📌
+
+- [ ] Deformable leaf physics — individual leaf movement requires rigged USD or PhysX FEM deformable body solver; explore as a research spike
+- [ ] Blueberry.usd in scene — scale always 5× bush scale; add alongside interactive bush once grid is restored
+- [ ] Texture fix — run `convert_bush_assets.py` if Bush.usd textures appear grey (Windows .mtl paths)
 
 ---
 
