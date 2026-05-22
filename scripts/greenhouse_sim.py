@@ -239,7 +239,7 @@ def build_interactive_bush() -> tuple[str, tuple]:
         # LocalPos1: trunk top in cluster-local frame = (−dx, −dy, _TRUNK_HEIGHT − dz)
         # At rest both frames coincide at (bx, by, _TRUNK_HEIGHT) in world space.
         joint_path = f"{base}/Joint_{i}"
-        d6 = UsdPhysics.D6Joint.Define(stage, joint_path)
+        d6 = UsdPhysics.Joint.Define(stage, joint_path)   # D6Joint renamed to Joint in pxr < 4.x
         d6.CreateBody0Rel().SetTargets([Sdf.Path(trunk_path)])
         d6.CreateBody1Rel().SetTargets([Sdf.Path(cluster_path)])
 
