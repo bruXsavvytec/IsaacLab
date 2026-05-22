@@ -285,23 +285,34 @@ def design_scene() -> dict:
 
 _contact_cooldown = 0
 
+# Only report contacts on non-leg links (ankle/foot contact during walking is normal noise).
+# Leg link names contain these substrings — suppress them during walk.
+_LEG_LINK_SUBSTRINGS = ("hip", "knee", "ankle", "calf", "thigh")
 
-def _check_contact(sensor: ContactSensor) -> None:
+
+def _check_contact(sensor: ContactSensor, phase: str) -> None:
+    """Print contact alerts only during arm-reach phases and only for non-leg links."""
     global _contact_cooldown
     if _contact_cooldown > 0:
         _contact_cooldown -= 1
         return
+    if phase not in ("reach_in", "inside", "reach_out"):
+        return   # ankle/foot contacts during walking are expected — skip
     if not sensor.is_initialized:
         return
     forces = sensor.data.net_forces_w
     if forces is None:
         return
-    mag = forces.norm(dim=-1).max().item()
-    if mag > 5.0:
-        idx  = forces.norm(dim=-1)[0].argmax().item()
-        name = sensor.body_names[idx]
-        print(f"[CONTACT] '{name}' — {mag:.1f} N")
-        _contact_cooldown = 100
+    magnitudes = forces.norm(dim=-1)[0]   # (N_bodies,)
+    for body_idx in range(len(sensor.body_names)):
+        name = sensor.body_names[body_idx]
+        if any(s in name for s in _LEG_LINK_SUBSTRINGS):
+            continue   # ignore foot/leg contacts
+        mag = magnitudes[body_idx].item()
+        if mag > 5.0:
+            print(f"[CONTACT] '{name}' touching cluster — {mag:.1f} N")
+            _contact_cooldown = 100
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +390,11 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
 
         # ── Policy inference ─────────────────────────────────────────────
         with torch.inference_mode():
-            obs         = build_obs(robot, cmd, last_action)
-            action      = policy(obs)        # (1, 37)
-            last_action = action.clone()
+            obs    = build_obs(robot, cmd, last_action)
+            action = policy(obs)        # (1, 37)
+        # Clone outside inference_mode — makes a normal tensor that allows in-place writes
+        action      = action.clone()
+        last_action = action.clone()
 
         # ── Arm override (REACH phases only) ─────────────────────────────
         # Policy still runs for legs (balance while standing).
@@ -411,7 +424,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
         robot.update(sim_dt)
 
         contact_sensor.update(sim_dt)
-        _check_contact(contact_sensor)
+        _check_contact(contact_sensor, phase)
 
 
 # ---------------------------------------------------------------------------
