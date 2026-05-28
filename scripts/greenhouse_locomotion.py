@@ -26,6 +26,7 @@ Observation layout (310-dim, matches Isaac-Velocity-Rough-G1-v0 training):
 
 Run from the IsaacLab root:
     ./isaaclab.sh -p scripts/greenhouse_locomotion.py
+    ./isaaclab.sh -p scripts/greenhouse_locomotion.py --enable_cameras
 """
 
 import argparse
@@ -39,6 +40,7 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -46,6 +48,10 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim import SimulationContext
+
+_CAMERAS_ENABLED = getattr(args_cli, "enable_cameras", False)
+if _CAMERAS_ENABLED:
+    from isaaclab.sensors import Camera, CameraCfg
 
 from isaaclab_assets.robots.unitree import G1_MINIMAL_CFG  # isort:skip
 
@@ -103,14 +109,31 @@ _CLUSTER_LAYOUT  = [
 ]
 _CLUSTER_COLORS  = [
     (0.18, 0.55, 0.12), (0.20, 0.60, 0.10), (0.15, 0.50, 0.15),
-    (0.22, 0.58, 0.08), (0.17, 0.52, 0.13), (0.12, 0.48, 0.16),
-    (0.20, 0.55, 0.11), (0.16, 0.53, 0.14), (0.19, 0.57, 0.09),
+    (0.72, 0.65, 0.10),  # index 3 — stressed yellow (nitrogen deficiency)
+    (0.17, 0.52, 0.13), (0.12, 0.48, 0.16),
+    (0.20, 0.55, 0.11),
+    (0.62, 0.52, 0.08),  # index 7 — stressed yellow-brown (root stress)
+    (0.19, 0.57, 0.09),
     (0.14, 0.50, 0.17),
 ]
+_UNHEALTHY_CLUSTER_INDICES = {3, 7}
 _CLUSTER_MASS    = 0.05
-_SPRING_STIFF    = 15.0
-_SPRING_DAMP     = 3.0
-_SWING_LIMIT_DEG = 60.0
+_SPRING_STIFF    = 3.0    # N·m/rad — soft; clusters deflect easily
+_SPRING_DAMP     = 0.8    # N·m·s/rad — low damping → natural oscillation
+_SWING_LIMIT_DEG = 75.0
+
+# ── Second-level leaf sub-clusters ──────────────────────────────────────────
+_LEAF_PER_CLUSTER = 3
+_LEAF_RADIUS      = 0.045
+_LEAF_MASS        = 0.006
+_LEAF_STIFFNESS   = 0.5
+_LEAF_DAMPING     = 0.10
+_LEAF_SWING_DEG   = 90.0
+_LEAF_OFFSETS     = [
+    ( 0.13,  0.00,  0.06),
+    (-0.07,  0.11,  0.08),
+    (-0.07, -0.11,  0.05),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +216,41 @@ def build_greenhouse(ox=_GH_CX, oy=_GH_CY, oz=0.0):
         _spawn_box(f"/World/Greenhouse/Pillar{i}", (0.12, 0.12, H), (ox+dx, oy+dy, wall_z), FRAME)
 
 
+def _attach_leaves(stage, cluster_path: str, cx: float, cy: float, cz: float,
+                   leaf_color: tuple, base: str, ci: int) -> None:
+    from pxr import UsdPhysics, Gf, Sdf
+    for j, (ldx, ldy, ldz) in enumerate(_LEAF_OFFSETS[:_LEAF_PER_CLUSTER]):
+        leaf_path = f"{base}/Leaf_{ci}_{j}"
+        leaf_cfg  = sim_utils.SphereCfg(
+            radius=_LEAF_RADIUS,
+            visual_material=_mat(_CLUSTER_COLORS[ci % len(_CLUSTER_COLORS)], opacity=0.80),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=False),
+        )
+        leaf_cfg.func(leaf_path, leaf_cfg, translation=(cx + ldx, cy + ldy, cz + ldz))
+        UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(leaf_path)).CreateMassAttr(_LEAF_MASS)
+
+        d6 = UsdPhysics.Joint.Define(stage, f"{base}/LeafJoint_{ci}_{j}")
+        d6.CreateBody0Rel().SetTargets([Sdf.Path(cluster_path)])
+        d6.CreateBody1Rel().SetTargets([Sdf.Path(leaf_path)])
+        d6.CreateLocalPos0Attr().Set(Gf.Vec3f(ldx, ldy, ldz))
+        d6.CreateLocalRot0Attr().Set(Gf.Quatf(1, 0, 0, 0))
+        d6.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        d6.CreateLocalRot1Attr().Set(Gf.Quatf(1, 0, 0, 0))
+        for axis in ("transX", "transY", "transZ"):
+            lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), axis)
+            lim.CreateLowAttr(0.0); lim.CreateHighAttr(0.0)
+        for axis in ("rotX", "rotY"):
+            lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), axis)
+            lim.CreateLowAttr(-_LEAF_SWING_DEG); lim.CreateHighAttr(_LEAF_SWING_DEG)
+            drv = UsdPhysics.DriveAPI.Apply(d6.GetPrim(), axis)
+            drv.CreateTypeAttr("force")
+            drv.CreateStiffnessAttr(_LEAF_STIFFNESS); drv.CreateDampingAttr(_LEAF_DAMPING)
+            drv.CreateTargetPositionAttr(0.0)
+        lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), "rotZ")
+        lim.CreateLowAttr(0.0); lim.CreateHighAttr(0.0)
+
+
 def build_interactive_bush() -> tuple[str, tuple]:
     from pxr import UsdPhysics, Gf, Sdf
     bx, by, _ = _BUSH_POS
@@ -244,7 +302,12 @@ def build_interactive_bush() -> tuple[str, tuple]:
         lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), "rotZ")
         lim.CreateLowAttr(0.0); lim.CreateHighAttr(0.0)
 
-    print(f"[INFO] Interactive bush at ({bx:.2f}, {by:.2f})")
+        _attach_leaves(stage, cluster_path, bx+dx, by+dy, dz,
+                       _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)], base, i)
+
+    n_leaves = len(_CLUSTER_LAYOUT) * _LEAF_PER_CLUSTER
+    print(f"[INFO] Soft bush: {len(_CLUSTER_LAYOUT)} clusters + {n_leaves} leaves  "
+          f"(cluster k={_SPRING_STIFF}, leaf k={_LEAF_STIFFNESS})")
     return base, (bx, by)
 
 
@@ -276,7 +339,25 @@ def design_scene() -> dict:
         history_length=1,
         debug_vis=False,
     ))
-    return {"robot": robot, "bush_xy": bush_xy, "contact_sensor": contact_sensor}
+
+    camera = None
+    if _CAMERAS_ENABLED:
+        camera = Camera(cfg=CameraCfg(
+            prim_path="/World/G1/torso_link/insp_cam",
+            update_period=0.1,
+            height=480,
+            width=640,
+            data_types=["rgb"],
+            spawn=sim_utils.PinholeCameraCfg(focal_length=8.5, clipping_range=(0.1, 30.0)),
+            offset=CameraCfg.OffsetCfg(
+                pos=(0.1, 0.0, 0.25),
+                rot=(0.7071, 0.0, 0.7071, 0.0),
+                convention="ros",
+            ),
+        ))
+
+    return {"robot": robot, "bush_xy": bush_xy,
+            "contact_sensor": contact_sensor, "camera": camera}
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +397,140 @@ def _check_contact(sensor: ContactSensor, phase: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# YOLO plant health inspector + live preview (omni.ui floating window)
+# ---------------------------------------------------------------------------
+
+_YOLO_MODEL        = None
+_YOLO_READY        = False
+_yolo_call_n       = 0
+_YOLO_EVERY        = 10
+_health_log: list  = []
+_last_yolo_results = None
+_last_health       = (0.0, 0.0)
+_PNG_OUT           = "/tmp/plant_inspector_latest.png"
+
+
+def _init_yolo() -> None:
+    global _YOLO_MODEL, _YOLO_READY
+    try:
+        from ultralytics import YOLO  # type: ignore
+        _YOLO_MODEL = YOLO("yolov8n.pt")
+        _YOLO_READY = True
+        print("[YOLO] YOLOv8n loaded — visual inspection active")
+    except Exception as exc:
+        print(f"[YOLO] Disabled ({exc})")
+        print("[YOLO]   pip install ultralytics")
+    print(f"[PREVIEW] Annotated frames saved to {_PNG_OUT}")
+    print(f"[PREVIEW] View live in a second terminal:  feh --auto-reload {_PNG_OUT}")
+
+
+def _analyze_health(rgb_np: np.ndarray) -> tuple:
+    img = rgb_np.astype(np.float32) / 255.0
+    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+    veg      = g > 0.20
+    healthy  = veg & (g > r * 1.35) & (g > b * 1.35)
+    stressed = veg & (r > 0.28) & (g > 0.28) & (g < r * 1.20) & (b < 0.25)
+    n_veg = float(veg.sum())
+    if n_veg < 200:
+        return 0.0, 0.0
+    return healthy.sum() / n_veg * 100.0, stressed.sum() / n_veg * 100.0
+
+
+def _show_preview(rgb_np: np.ndarray) -> None:
+    """Save annotated camera frame to /tmp/plant_inspector_latest.png.
+
+    Open in a second terminal with:  feh --auto-reload /tmp/plant_inspector_latest.png
+    """
+    from PIL import Image as PILImage, ImageDraw
+    h_pct, s_pct = _last_health
+    display = rgb_np.copy()
+
+    # Tint stressed pixels red
+    img_f = display.astype(np.float32) / 255.0
+    r_ch, g_ch, b_ch = img_f[:, :, 0], img_f[:, :, 1], img_f[:, :, 2]
+    stressed_mask = (r_ch > 0.28) & (g_ch > 0.28) & (g_ch < r_ch * 1.20) & (b_ch < 0.25)
+    if stressed_mask.any():
+        overlay = display.copy()
+        overlay[stressed_mask] = [220, 60, 60]
+        display = (display * 0.55 + overlay * 0.45).astype(np.uint8)
+
+    pil_img = PILImage.fromarray(display)
+    draw    = ImageDraw.Draw(pil_img)
+    if _last_yolo_results is not None:
+        boxes = _last_yolo_results[0].boxes
+        names = _last_yolo_results[0].names
+        for box in boxes:
+            if float(box.conf) < 0.35:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+            label = f"{names[int(box.cls)]} {float(box.conf):.0%}"
+            draw.rectangle([x1, y1, x2, y2], outline=(0, 220, 80), width=2)
+            draw.text((x1 + 3, max(y1 - 14, 0)), label, fill=(0, 220, 80))
+
+    verdict = "STRESSED" if s_pct > 15.0 else "HEALTHY"
+    col     = (220, 60, 60) if s_pct > 15.0 else (60, 200, 60)
+    draw.rectangle([0, 0, 300, 60], fill=(20, 20, 20))
+    draw.text((8,  6), verdict, fill=col)
+    draw.text((8, 34), f"Green {h_pct:.0f}%   Stressed {s_pct:.0f}%", fill=(200, 200, 200))
+
+    pil_img.save(_PNG_OUT)
+
+
+def _run_inspection(camera, phase: str) -> None:
+    global _yolo_call_n, _last_yolo_results, _last_health
+    if camera is None or not camera.is_initialized:
+        return
+    rgb = camera.data.output.get("rgb")
+    if rgb is None:
+        return
+
+    rgb_np       = rgb[0, :, :, :3].cpu().numpy()
+    h_pct, s_pct = _analyze_health(rgb_np)
+    _last_health  = (h_pct, s_pct)
+
+    if phase == "inside" and h_pct + s_pct > 0:
+        status = "STRESSED" if s_pct > 15.0 else "HEALTHY"
+        print(f"[INSPECT] Green: {h_pct:.0f}%  Stressed: {s_pct:.0f}%  → {status}")
+        _health_log.append({"h": h_pct, "s": s_pct})
+
+    _yolo_call_n += 1
+    if _YOLO_READY and _yolo_call_n % _YOLO_EVERY == 0:
+        rgb_bgr            = rgb_np[:, :, ::-1].copy()
+        results            = _YOLO_MODEL(rgb_bgr, verbose=False)
+        _last_yolo_results = results
+        boxes, names = results[0].boxes, results[0].names
+        hits = [(names[int(b.cls)], float(b.conf))
+                for b in boxes if float(b.conf) > 0.35]
+        if hits:
+            print(f"[YOLO] {', '.join(f'{n} ({c:.0%})' for n, c in hits)}")
+
+    _show_preview(rgb_np)
+
+
+def _print_inspection_report() -> None:
+    if not _health_log:
+        print("[INSPECT] No vegetation pixels captured during inspection.")
+        return
+    n     = len(_health_log)
+    avg_h = sum(d["h"] for d in _health_log) / n
+    avg_s = sum(d["s"] for d in _health_log) / n
+    verdict = "NEEDS ATTENTION" if avg_s > 15.0 else "HEALTHY"
+    print(f"\n[INSPECT REPORT] ── {n} frames analysed ──")
+    print(f"  Avg healthy green  : {avg_h:.1f}%")
+    print(f"  Avg stressed/yellow: {avg_s:.1f}%")
+    print(f"  Verdict: {verdict}  (unhealthy clusters: {sorted(_UNHEALTHY_CLUSTER_INDICES)})")
+    if _YOLO_READY:
+        print(f"  YOLO ran {_yolo_call_n // _YOLO_EVERY} time(s)")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Main loop — policy locomotion + arm inspection
 # ---------------------------------------------------------------------------
 
 def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module,
-                  bush_xy: tuple, sim_dt: float, contact_sensor: ContactSensor):
+                  bush_xy: tuple, sim_dt: float, contact_sensor: ContactSensor,
+                  camera=None):
     device = sim.device
 
     # Joint index map for arm overrides
@@ -376,6 +586,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
             cmd    = stop_cmd
             frame += 1
             if frame >= HOLD_FRAMES:
+                _print_inspection_report()
                 print("[INSIDE→REACH_OUT] retracting arm — clusters spring back")
                 phase = "reach_out"; frame = 0
 
@@ -426,6 +637,10 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
         contact_sensor.update(sim_dt)
         _check_contact(contact_sensor, phase)
 
+        if camera is not None:
+            camera.update(sim_dt)
+            _run_inspection(camera, phase)
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -447,13 +662,20 @@ def main():
     robot          = entities["robot"]
     bush_xy        = entities["bush_xy"]
     contact_sensor = entities["contact_sensor"]
+    camera         = entities["camera"]
 
     sim.reset()
+    _init_yolo()
     print("[INFO] Scene ready — loading locomotion policy...")
+    print(f"[INFO] Unhealthy clusters (yellow): {sorted(_UNHEALTHY_CLUSTER_INDICES)}")
+    if camera is not None:
+        print("[INFO] Camera active — YOLO + colour-health inspection enabled")
+    else:
+        print("[INFO] Camera disabled — rerun with --enable_cameras to enable YOLO")
     policy = load_policy(sim.device)
     print("[INFO] Policy ready. G1 will walk under real dynamics.\n")
 
-    run_simulator(sim, robot, policy, bush_xy, sim_cfg.dt, contact_sensor)
+    run_simulator(sim, robot, policy, bush_xy, sim_cfg.dt, contact_sensor, camera)
 
 
 if __name__ == "__main__":

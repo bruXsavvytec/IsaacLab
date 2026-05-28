@@ -38,6 +38,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 # All non-stdlib imports must come after AppLauncher
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import isaaclab.sim as sim_utils
@@ -109,15 +110,32 @@ _CLUSTER_LAYOUT = [
 
 _CLUSTER_COLORS = [
     (0.18, 0.55, 0.12), (0.20, 0.60, 0.10), (0.15, 0.50, 0.15),
-    (0.22, 0.58, 0.08), (0.17, 0.52, 0.13), (0.12, 0.48, 0.16),
-    (0.20, 0.55, 0.11), (0.16, 0.53, 0.14), (0.19, 0.57, 0.09),
+    (0.72, 0.65, 0.10),  # index 3 — stressed yellow (nitrogen deficiency)
+    (0.17, 0.52, 0.13), (0.12, 0.48, 0.16),
+    (0.20, 0.55, 0.11),
+    (0.62, 0.52, 0.08),  # index 7 — stressed yellow-brown (root stress)
+    (0.19, 0.57, 0.09),
     (0.14, 0.50, 0.17),
 ]
+_UNHEALTHY_CLUSTER_INDICES = {3, 7}   # clusters that are visually diseased
 
-_CLUSTER_MASS     = 0.05   # kg  (50 g per cluster — light enough to deflect easily)
-_SPRING_STIFFNESS = 15.0   # N·m/rad — spring-back torque per radian of deflection
-_SPRING_DAMPING   =  3.0   # N·m·s/rad — kills oscillation after robot withdraws
-_SWING_LIMIT_DEG  = 60.0   # max angular deflection in degrees
+_CLUSTER_MASS     = 0.05   # kg
+_SPRING_STIFFNESS = 3.0    # N·m/rad — soft spring; clusters deflect easily
+_SPRING_DAMPING   = 0.8    # N·m·s/rad — low damping → natural oscillation
+_SWING_LIMIT_DEG  = 75.0   # max deflection in degrees
+
+# ── Second-level leaf sub-clusters (attached to clusters, not trunk) ────────
+_LEAF_PER_CLUSTER = 3       # leaves per cluster
+_LEAF_RADIUS      = 0.045   # m — smaller than clusters
+_LEAF_MASS        = 0.006   # kg — very light → responds quickly to touch
+_LEAF_STIFFNESS   = 0.5     # N·m/rad — ultra-soft spring
+_LEAF_DAMPING     = 0.10    # N·m·s/rad — minimal damping → lingering wobble
+_LEAF_SWING_DEG   = 90.0    # degrees — large range for dramatic sway
+_LEAF_OFFSETS     = [       # (dx, dy, dz) relative to each cluster centre
+    ( 0.13,  0.00,  0.06),
+    (-0.07,  0.11,  0.08),
+    (-0.07, -0.11,  0.05),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +194,51 @@ def build_greenhouse(ox=_GH_CX, oy=_GH_CY, oz=0.0):
 # ---------------------------------------------------------------------------
 # Interactive bush — trunk + spring-jointed leaf clusters
 # ---------------------------------------------------------------------------
+
+def _attach_leaves(stage, cluster_path: str, cx: float, cy: float, cz: float,
+                   leaf_color: tuple, base: str, ci: int) -> None:
+    """Attach _LEAF_PER_CLUSTER tiny spheres to a cluster via ultra-soft D6 springs.
+
+    Pivot is the cluster centre; leaves sway on top of cluster motion giving a
+    two-level cascade: robot pushes cluster → cluster moves → leaves wobble.
+    """
+    from pxr import UsdPhysics, Gf, Sdf
+
+    for j, (ldx, ldy, ldz) in enumerate(_LEAF_OFFSETS[:_LEAF_PER_CLUSTER]):
+        leaf_path = f"{base}/Leaf_{ci}_{j}"
+        leaf_cfg  = sim_utils.SphereCfg(
+            radius=_LEAF_RADIUS,
+            visual_material=_mat(leaf_color, opacity=0.80),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=False),
+        )
+        leaf_cfg.func(leaf_path, leaf_cfg, translation=(cx + ldx, cy + ldy, cz + ldz))
+        UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(leaf_path)).CreateMassAttr(_LEAF_MASS)
+
+        # D6 joint: cluster (dynamic parent) → leaf (dynamic child); pivot at cluster centre
+        d6 = UsdPhysics.Joint.Define(stage, f"{base}/LeafJoint_{ci}_{j}")
+        d6.CreateBody0Rel().SetTargets([Sdf.Path(cluster_path)])
+        d6.CreateBody1Rel().SetTargets([Sdf.Path(leaf_path)])
+        d6.CreateLocalPos0Attr().Set(Gf.Vec3f(ldx, ldy, ldz))
+        d6.CreateLocalRot0Attr().Set(Gf.Quatf(1, 0, 0, 0))
+        d6.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        d6.CreateLocalRot1Attr().Set(Gf.Quatf(1, 0, 0, 0))
+
+        for axis in ("transX", "transY", "transZ"):
+            lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), axis)
+            lim.CreateLowAttr(0.0); lim.CreateHighAttr(0.0)
+
+        for axis in ("rotX", "rotY"):
+            lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), axis)
+            lim.CreateLowAttr(-_LEAF_SWING_DEG); lim.CreateHighAttr(_LEAF_SWING_DEG)
+            drv = UsdPhysics.DriveAPI.Apply(d6.GetPrim(), axis)
+            drv.CreateTypeAttr("force")
+            drv.CreateStiffnessAttr(_LEAF_STIFFNESS); drv.CreateDampingAttr(_LEAF_DAMPING)
+            drv.CreateTargetPositionAttr(0.0)
+
+        lim = UsdPhysics.LimitAPI.Apply(d6.GetPrim(), "rotZ")
+        lim.CreateLowAttr(0.0); lim.CreateHighAttr(0.0)
+
 
 def build_interactive_bush() -> tuple[str, tuple]:
     """Build a procedural bush with articulated leaf clusters.
@@ -271,9 +334,13 @@ def build_interactive_bush() -> tuple[str, tuple]:
         lim.CreateLowAttr(0.0)
         lim.CreateHighAttr(0.0)
 
-    print(f"[INFO] Interactive bush: trunk at ({bx:.1f}, {by:.1f}), "
-          f"{len(_CLUSTER_LAYOUT)} spring-jointed clusters  "
-          f"(stiffness={_SPRING_STIFFNESS}, damping={_SPRING_DAMPING})")
+        # Attach second-level leaf sub-spheres to this cluster
+        _attach_leaves(stage, cluster_path, bx+dx, by+dy, dz,
+                       _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)], base, i)
+
+    n_leaves = len(_CLUSTER_LAYOUT) * _LEAF_PER_CLUSTER
+    print(f"[INFO] Soft bush: {len(_CLUSTER_LAYOUT)} clusters + {n_leaves} leaves  "
+          f"(cluster k={_SPRING_STIFFNESS}, leaf k={_LEAF_STIFFNESS})")
     return base, (bx, by)
 
 
@@ -358,21 +425,141 @@ def _check_contact(sensor: ContactSensor) -> None:
         _contact_print_cooldown = 100
 
 
-_cam_log_counter = 0
-_CAM_LOG_EVERY   = 300
+# ---------------------------------------------------------------------------
+# YOLO plant health inspector + live preview (omni.ui floating window)
+# ---------------------------------------------------------------------------
+
+_YOLO_MODEL        = None
+_YOLO_READY        = False
+_yolo_call_n       = 0
+_YOLO_EVERY        = 10      # run YOLO every N inspection calls (~10 Hz cam → ~1 s)
+_health_log: list  = []
+_last_yolo_results = None    # cached between YOLO runs so boxes persist on preview
+_last_health       = (0.0, 0.0)
+_PNG_OUT           = "/tmp/plant_inspector_latest.png"
 
 
-def _log_camera(camera) -> None:
-    global _cam_log_counter
-    _cam_log_counter += 1
-    if _cam_log_counter % _CAM_LOG_EVERY != 0:
-        return
-    if not camera.is_initialized:
+def _init_yolo() -> None:
+    global _YOLO_MODEL, _YOLO_READY
+    try:
+        from ultralytics import YOLO  # type: ignore
+        _YOLO_MODEL = YOLO("yolov8n.pt")
+        _YOLO_READY = True
+        print("[YOLO] YOLOv8n loaded — visual inspection active")
+    except Exception as exc:
+        print(f"[YOLO] Disabled ({exc})")
+        print("[YOLO]   pip install ultralytics")
+    print(f"[PREVIEW] Annotated frames saved to {_PNG_OUT}")
+    print(f"[PREVIEW] View live in a second terminal:  feh --auto-reload {_PNG_OUT}")
+
+
+def _analyze_health(rgb_np: np.ndarray) -> tuple:
+    """Pixel-level colour health analysis.  Returns (healthy_pct, stressed_pct)."""
+    img = rgb_np.astype(np.float32) / 255.0
+    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+    veg      = g > 0.20
+    healthy  = veg & (g > r * 1.35) & (g > b * 1.35)
+    stressed = veg & (r > 0.28) & (g > 0.28) & (g < r * 1.20) & (b < 0.25)
+    n_veg = float(veg.sum())
+    if n_veg < 200:
+        return 0.0, 0.0
+    return healthy.sum() / n_veg * 100.0, stressed.sum() / n_veg * 100.0
+
+
+def _show_preview(rgb_np: np.ndarray) -> None:
+    """Save annotated camera frame to /tmp/plant_inspector_latest.png.
+
+    Open in a second terminal with:  feh --auto-reload /tmp/plant_inspector_latest.png
+    feh refreshes automatically each time the file is updated (~10 Hz).
+    """
+    from PIL import Image as PILImage, ImageDraw
+    h_pct, s_pct = _last_health
+    display = rgb_np.copy()
+
+    # Tint stressed pixels red
+    img_f = display.astype(np.float32) / 255.0
+    r_ch, g_ch, b_ch = img_f[:, :, 0], img_f[:, :, 1], img_f[:, :, 2]
+    stressed_mask = (r_ch > 0.28) & (g_ch > 0.28) & (g_ch < r_ch * 1.20) & (b_ch < 0.25)
+    if stressed_mask.any():
+        overlay = display.copy()
+        overlay[stressed_mask] = [220, 60, 60]
+        display = (display * 0.55 + overlay * 0.45).astype(np.uint8)
+
+    # Draw YOLO boxes + labels
+    pil_img = PILImage.fromarray(display)
+    draw    = ImageDraw.Draw(pil_img)
+    if _last_yolo_results is not None:
+        boxes = _last_yolo_results[0].boxes
+        names = _last_yolo_results[0].names
+        for box in boxes:
+            if float(box.conf) < 0.35:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+            label = f"{names[int(box.cls)]} {float(box.conf):.0%}"
+            draw.rectangle([x1, y1, x2, y2], outline=(0, 220, 80), width=2)
+            draw.text((x1 + 3, max(y1 - 14, 0)), label, fill=(0, 220, 80))
+
+    # Health HUD — dark bar in top-left corner
+    verdict = "STRESSED" if s_pct > 15.0 else "HEALTHY"
+    col     = (220, 60, 60) if s_pct > 15.0 else (60, 200, 60)
+    draw.rectangle([0, 0, 300, 60], fill=(20, 20, 20))
+    draw.text((8,  6), verdict, fill=col)
+    draw.text((8, 34), f"Green {h_pct:.0f}%   Stressed {s_pct:.0f}%", fill=(200, 200, 200))
+
+    pil_img.save(_PNG_OUT)
+
+
+def _run_inspection(camera, phase: str) -> None:
+    """Colour health analysis every frame + YOLO every _YOLO_EVERY frames + live preview."""
+    global _yolo_call_n, _last_yolo_results, _last_health
+    if camera is None or not camera.is_initialized:
         return
     rgb = camera.data.output.get("rgb")
-    if rgb is not None:
-        print(f"[CAMERA] RGB frame shape: {tuple(rgb.shape)}  "
-              f"dtype: {rgb.dtype}  device: {rgb.device}")
+    if rgb is None:
+        return
+
+    # RGBA (1,H,W,4) GPU tensor → RGB numpy (H,W,3) CPU
+    rgb_np = rgb[0, :, :, :3].cpu().numpy()
+
+    # ── Colour health analysis (cheap, always) ──────────────────────────
+    h_pct, s_pct = _analyze_health(rgb_np)
+    _last_health  = (h_pct, s_pct)
+    if phase == "inside" and h_pct + s_pct > 0:
+        status = "STRESSED" if s_pct > 15.0 else "HEALTHY"
+        print(f"[INSPECT] Green: {h_pct:.0f}%  Stressed: {s_pct:.0f}%  → {status}")
+        _health_log.append({"h": h_pct, "s": s_pct})
+
+    # ── YOLO inference (every N calls) ──────────────────────────────────
+    _yolo_call_n += 1
+    if _YOLO_READY and _yolo_call_n % _YOLO_EVERY == 0:
+        rgb_bgr            = rgb_np[:, :, ::-1].copy()
+        results            = _YOLO_MODEL(rgb_bgr, verbose=False)
+        _last_yolo_results = results
+        boxes, names = results[0].boxes, results[0].names
+        hits = [(names[int(b.cls)], float(b.conf))
+                for b in boxes if float(b.conf) > 0.35]
+        if hits:
+            print(f"[YOLO] {', '.join(f'{n} ({c:.0%})' for n, c in hits)}")
+
+    # ── Live preview window ──────────────────────────────────────────────
+    _show_preview(rgb_np)
+
+
+def _print_inspection_report() -> None:
+    if not _health_log:
+        print("[INSPECT] No vegetation pixels captured during inspection.")
+        return
+    n     = len(_health_log)
+    avg_h = sum(d["h"] for d in _health_log) / n
+    avg_s = sum(d["s"] for d in _health_log) / n
+    verdict = "NEEDS ATTENTION" if avg_s > 15.0 else "HEALTHY"
+    print(f"\n[INSPECT REPORT] ── {n} frames analysed ──")
+    print(f"  Avg healthy green  : {avg_h:.1f}%")
+    print(f"  Avg stressed/yellow: {avg_s:.1f}%")
+    print(f"  Verdict: {verdict}  (unhealthy clusters: {sorted(_UNHEALTHY_CLUSTER_INDICES)})")
+    if _YOLO_READY:
+        print(f"  YOLO ran {_yolo_call_n // _YOLO_EVERY} time(s)")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +631,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation,
             frame   += 1
             cur_jpos = reach_jpos
             if frame >= HOLD_FRAMES:
+                _print_inspection_report()
                 print("[INSIDE→REACH_OUT] retracting arm")
                 phase = "reach_out"; frame = 0
 
@@ -475,7 +663,7 @@ def run_simulator(sim: SimulationContext, robot: Articulation,
 
         if camera is not None:
             camera.update(sim_dt)
-            _log_camera(camera)
+            _run_inspection(camera, phase)
 
 
 # ---------------------------------------------------------------------------
@@ -500,11 +688,13 @@ def main():
     camera         = entities["camera"]
 
     sim.reset()
+    _init_yolo()
     print(f"[INFO] Scene ready — interactive bush at {_BUSH_POS}, robot at {_ROBOT_START}")
+    print(f"[INFO] Unhealthy clusters (yellow): {sorted(_UNHEALTHY_CLUSTER_INDICES)}")
     if camera is not None:
-        print("[INFO] Camera active — RGB frames available each step")
+        print("[INFO] Camera active — YOLO + colour-health inspection enabled")
     else:
-        print("[INFO] Camera disabled — rerun with --enable_cameras to enable")
+        print("[INFO] Camera disabled — rerun with --enable_cameras to enable YOLO")
 
     run_simulator(sim, robot, bush_xy, sim_cfg.dt, contact_sensor, camera)
 

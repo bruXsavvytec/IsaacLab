@@ -14,7 +14,7 @@
 4. [How to Run](#4-how-to-run)
 5. [Task List](#5-task-list)
 6. [What Has Been Built](#6-what-has-been-built)
-7. [Architecture & State Machine](#7-architecture--state-machine)
+7. [Architecture & Key Patterns](#7-architecture--key-patterns)
 8. [Key Technical Learnings & Gotchas](#8-key-technical-learnings--gotchas)
 9. [Known Limitations](#9-known-limitations)
 10. [Roadmap](#10-roadmap)
@@ -31,16 +31,18 @@ The full vision (in order of implementation):
 ```
 Kinematic scripted walk
        ↓
-Contact detection (is the robot touching a bush?)
+Interactive spring-jointed bush (clusters deflect, spring back)    ✅ DONE
        ↓
-RGB camera + YOLO (can the robot see unhealthy plants?)
+Contact detection (is the robot touching a cluster?)               ✅ DONE
        ↓
-Pre-trained locomotion policy (real walking, not kinematic glide)
+RGB camera + YOLO + colour health analysis                         ✅ DONE
        ↓
-VLA (Vision-Language-Action model) for high-level task planning
+Pre-trained locomotion policy (real walking dynamics)              ✅ DONE
+       ↓
+Soft / deformable bush asset (PhysX cloth leaves)                  🔜 next
+       ↓
+VLA (Vision-Language-Action model) for high-level planning         📋 future
 ```
-
-The current milestone: **scripted single-bush interaction** — robot walks to one bush, reaches its arm inside, holds, retracts.
 
 ---
 
@@ -51,10 +53,12 @@ The current milestone: **scripted single-bush interaction** — robot walks to o
 | Component | Version |
 |---|---|
 | Isaac Lab | 2.3.2 |
-| Isaac Sim | 4.x (bundled with Isaac Lab) |
+| Isaac Sim | 4.x (bundled) |
 | Python | 3.10.12 |
 | PyTorch | bundled with Isaac Sim |
-| USD / pxr | bundled with Isaac Sim |
+| ultralytics (YOLO) | installed in isaac-env |
+| opencv-python | 4.12.0 — headless build (no GUI) |
+| Pillow | bundled with Isaac Sim |
 | OS | Ubuntu 22.04 |
 
 ### 2.2 Installation Paths
@@ -62,42 +66,43 @@ The current milestone: **scripted single-bush interaction** — robot walks to o
 | What | Path |
 |---|---|
 | IsaacLab root | `/home/trooperai/IsaacLab/` |
-| Isaac Sim Python env | `/home/trooperai/isaac-env/lib/python3.10/` |
-| 3D asset models repo | `/home/trooperai/dev-bru/Nvidia-Isaac-Sim-Procedual-Forest-Generator/models/` |
+| Isaac Sim Python env | `/home/trooperai/isaac-env/` |
+| Pre-trained G1 checkpoint | `/home/trooperai/IsaacLab/.pretrained_checkpoints/rsl_rl/Isaac-Velocity-Rough-G1-v0/checkpoint.pt` |
+| 3D asset models | `/home/trooperai/dev-bru/Nvidia-Isaac-Sim-Procedual-Forest-Generator/models/` |
 | IsaacLab launcher | `/home/trooperai/IsaacLab/isaaclab.sh` |
 
-### 2.3 How Isaac Lab Scripts Are Run
+### 2.3 How to Run Scripts
 
-**All scripts must be launched through the isaaclab.sh wrapper**, not plain Python:
+**Always use `isaaclab.sh`**, never plain `python3`:
 
 ```bash
-# From the IsaacLab root directory
 cd /home/trooperai/IsaacLab
 
+# Kinematic demo (scripted walk, no policy)
 ./isaaclab.sh -p scripts/greenhouse_sim.py
-./isaaclab.sh -p scripts/greenhouse_sim.py --enable_cameras
-./isaaclab.sh -p scripts/greenhouse_sim.py --headless
-```
 
-> **Why:** `isaaclab.sh` sets up the Isaac Sim Python environment, Omniverse Carbonite settings, GPU rendering, and Nucleus connection. Running with plain `python3` will silently produce dummy modules and fail at simulation time.
+# With camera + YOLO + Plant Inspector window
+./isaaclab.sh -p scripts/greenhouse_sim.py --enable_cameras
+
+# Locomotion policy demo (real walking dynamics)
+./isaaclab.sh -p scripts/greenhouse_locomotion.py
+
+# Locomotion + camera + YOLO
+./isaaclab.sh -p scripts/greenhouse_locomotion.py --enable_cameras
+```
 
 ### 2.4 Critical Import Rule
 
-All `import isaaclab.*` and `import omni.*` statements **must come after** `AppLauncher` is instantiated:
+All `import isaaclab.*` and `import omni.*` must come **after** `AppLauncher`:
 
 ```python
 from isaaclab.app import AppLauncher
-
-parser = argparse.ArgumentParser()
-AppLauncher.add_app_launcher_args(parser)
-args_cli = parser.parse_args()
-app_launcher = AppLauncher(args_cli)      # ← Isaac Sim boots here
+app_launcher = AppLauncher(args_cli)   # Isaac Sim boots here
 simulation_app = app_launcher.app
 
-# ONLY after this line:
+# Only AFTER this:
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
-# etc.
+import omni.ui as ui
 ```
 
 ---
@@ -107,118 +112,90 @@ from isaaclab.assets import Articulation
 ```
 IsaacLab/
 ├── scripts/
-│   ├── greenhouse_sim.py          ← MAIN: single-bush interaction demo
+│   ├── greenhouse_sim.py          ← Kinematic demo: interactive bush + YOLO
+│   ├── greenhouse_locomotion.py   ← Locomotion policy demo: RSL-RL G1 + bush + YOLO
 │   ├── demos/
-│   │   ├── g1.py                  ← Minimal G1 stand demo (falls — no balance)
-│   │   ├── g1_locomotion.py       ← G1 with pre-trained locomotion policy
-│   │   ├── h1_locomotion.py       ← H1 locomotion reference (working)
+│   │   ├── g1.py                  ← Minimal G1 stand (falls — no balance)
+│   │   ├── g1_locomotion.py       ← G1 locomotion reference
+│   │   ├── h1_locomotion.py       ← H1 locomotion reference (used as template)
 │   │   └── sensors/
-│   │       ├── contact_sensor.py  ← Contact sensor reference demo
-│   │       └── cameras.py         ← Camera sensor reference demo
+│   │       ├── contact_sensor.py  ← Contact sensor reference
+│   │       └── cameras.py         ← Camera sensor reference
 │   └── tools/
-│       ├── asset_showcase.py      ← [NEW] Spawn all USD assets in a grid for visual review
-│       ├── browse_nucleus.py      ← [NEW] Browse NVIDIA Nucleus asset directories via CLI
-│       └── convert_bush_assets.py ← [NEW] OBJ→USD converter with texture path fix
+│       ├── asset_showcase.py      ← Spawn all USD assets in a grid for review
+│       ├── browse_nucleus.py      ← Browse NVIDIA Nucleus directories via CLI
+│       └── convert_bush_assets.py ← OBJ→USD converter with texture path fix
+│
+├── .pretrained_checkpoints/
+│   └── rsl_rl/Isaac-Velocity-Rough-G1-v0/checkpoint.pt   ← RSL-RL G1 policy
 │
 ├── source/
 │   ├── isaaclab/isaaclab/
 │   │   ├── assets/articulation/   ← Articulation, ArticulationCfg
-│   │   ├── sensors/               ← ContactSensor, Camera, ContactSensorCfg, CameraCfg
-│   │   ├── sim/                   ← SimulationContext, SimulationCfg, RenderCfg
-│   │   └── sim/schemas/           ← define_rigid_body_properties, CollisionPropertiesCfg …
+│   │   ├── sensors/               ← ContactSensor, Camera, CameraCfg
+│   │   └── sim/                   ← SimulationContext, SimulationCfg, RenderCfg
 │   └── isaaclab_assets/isaaclab_assets/robots/
-│       └── unitree.py             ← G1_CFG, G1_MINIMAL_CFG, H1_CFG (joint defaults, PD gains)
+│       └── unitree.py             ← G1_CFG, G1_MINIMAL_CFG (joint defaults, PD gains)
 │
 ├── GREENHOUSE_PROJECT.md          ← This file
-└── isaaclab.sh                    ← Run all scripts through this
-
-External asset repo (not in IsaacLab):
-~/dev-bru/Nvidia-Isaac-Sim-Procedual-Forest-Generator/models/
-├── Bush_obj/        Bush.usd, Bush.obj, Bush.mtl, textures/
-├── Blueberry_obj/   Blueberry.usd, Blueberry.obj …
-├── Birch_obj/
-├── Pine_obj/
-├── Rock_obj/
-├── Spruce_obj/
-└── maple_obj/
+└── isaaclab.sh                    ← Always run scripts through this
 ```
 
 ---
 
 ## 4. How to Run
 
-### 4.1 Main Demo — Single-Bush Arm Interaction
+### 4.1 `greenhouse_sim.py` — Kinematic Demo
 
 ```bash
-cd /home/trooperai/IsaacLab
-
-# GUI mode (required to see the viewport)
-./isaaclab.sh -p scripts/greenhouse_sim.py
-
-# With RGB camera sensor active
-./isaaclab.sh -p scripts/greenhouse_sim.py --enable_cameras
-
-# Headless (no window, useful for SSH)
-./isaaclab.sh -p scripts/greenhouse_sim.py --headless
+./isaaclab.sh -p scripts/greenhouse_sim.py               # basic
+./isaaclab.sh -p scripts/greenhouse_sim.py --enable_cameras  # + YOLO + Inspector window
 ```
 
-**What you will see:**
-1. Greenhouse floor + corner pillars (glass walls hidden for clear view)
-2. One Bush.usd at world position `(5.0, 0.70, 0.0)` — 70 cm to the robot's left
-3. G1 robot spawns at `(2.5, 0.0, 0.74)` facing +X
-4. Robot walks to `(5.0, 0.0, 0.74)` — level with the bush
-5. Left arm slowly extends sideways (90° roll) into the bush (~0.6 s)
-6. Arm holds inside for ~0.8 s
-7. Arm retracts (~0.6 s)
-8. Robot stands still; viewport stays live (Ctrl+C to quit)
+**What you see:**
+1. Greenhouse floor + pillars
+2. One procedural interactive bush at `(5.0, 0.70, 0.0)` — 10 spring-jointed sphere clusters, 2 of them yellow (simulated disease)
+3. G1 robot glides from `(2.5, 0.0)` to `(5.0, 0.0)` — kinematic root, no policy
+4. Left arm ramps in → clusters deflect → arm holds → clusters spring back → arm retracts
+5. `--enable_cameras`: **"Plant Inspector"** panel appears inside Isaac Sim showing the camera feed with stressed pixels tinted red + YOLO boxes + health HUD
 
-**Terminal output during run:**
+**Terminal output:**
 ```
-[INFO] Bush spawned at (5.0, 0.7, 0.0)  prim: /World/Greenhouse/Plants/Bush
-[INFO] Scene ready — 1 bush at (5.0, 0.7, 0.0), robot starts at (2.5, 0.0, 0.74)
-[WALK→REACH_IN] arrived at inspection position (5.0, 0.0)
-[REACH_IN→INSIDE] arm fully extended — hand inside bush
-[INSIDE→REACH_OUT] retracting arm
-[REACH_OUT→DONE] arm retracted — interaction complete
-[CONTACT] Robot body 'left_elbow_pitch_link' touching something — force 12.3 N
+[YOLO] YOLOv8n loaded — visual inspection active
+[PREVIEW] 'Plant Inspector' window created inside Isaac Sim
+[WALK→REACH_IN] arrived at (5.0, 0.0)
+[REACH_IN→INSIDE] arm fully extended — clusters pushed aside
+[INSPECT] Green: 62%  Stressed: 24%  → STRESSED
+[YOLO] sports ball (78%), person (61%)
+[INSPECT REPORT] ── 8 frames analysed ──
+  Avg healthy green  : 64.2%
+  Avg stressed/yellow: 22.1%
+  Verdict: NEEDS ATTENTION  (unhealthy clusters: [3, 7])
+[INSIDE→REACH_OUT] retracting arm — clusters spring back
 ```
 
-### 4.2 Asset Showcase Tool
-
-Preview all locally available USD plant assets in a grid before adding them to the main scene:
+### 4.2 `greenhouse_locomotion.py` — Policy Demo
 
 ```bash
-./isaaclab.sh -p scripts/tools/asset_showcase.py
+./isaaclab.sh -p scripts/greenhouse_locomotion.py                # basic
+./isaaclab.sh -p scripts/greenhouse_locomotion.py --enable_cameras  # + YOLO
 ```
 
-Currently active assets in the grid: **Bush** (scale 1.0) and **Blueberry** (scale 5.0).  
-Edit `_ASSETS` in the script to add/remove assets.  
-Middle-mouse drag to orbit, scroll to zoom.
+**What you see:**
+1. Same scene, but robot walks naturally under the **pre-trained RSL-RL rough-terrain policy**
+2. G1 walks to the bush (`WALK → ARRIVE → REACH_IN → INSIDE → REACH_OUT → DONE`)
+3. During `REACH_IN/INSIDE/REACH_OUT`: locomotion policy still runs for legs (balance); arm joints are overridden separately
+4. Contact sensor only reports during arm-reach phases (leg contacts during walking are suppressed)
 
-### 4.3 Browse Nucleus
-
-```bash
-# List the vegetation directory
-./isaaclab.sh -p scripts/tools/browse_nucleus.py
-
-# Custom path
-./isaaclab.sh -p scripts/tools/browse_nucleus.py --path "NVIDIA/Assets/Vegetation/Plants"
-
-# Recursive listing of all USD files
-./isaaclab.sh -p scripts/tools/browse_nucleus.py --path "NVIDIA/Assets" --recursive
+**State machine:**
 ```
-
-> **Note:** This system has no `NVIDIA/Assets/Vegetation` folder in Nucleus. Local assets from the forest generator repo are used instead.
-
-### 4.4 Convert OBJ Assets to USD
-
-Fixes Windows absolute texture paths that break on Linux:
-
-```bash
-./isaaclab.sh -p scripts/tools/convert_bush_assets.py
+WALK      → policy(vx=0.8, vy=0, wz=0) until robot_x ≥ 5.0 m
+ARRIVE    → stop command for 50 frames — robot decelerates
+REACH_IN  → arm ramps in over 60 frames (policy still holds balance)
+INSIDE    → arm holds for 80 frames, YOLO + health analysis runs
+REACH_OUT → arm retracts over 60 frames
+DONE      → zero command, robot stands
 ```
-
-Outputs `Bush_local.usd` and `Blueberry_local.usd` next to the originals.
 
 ---
 
@@ -228,316 +205,331 @@ Outputs `Bush_local.usd` and `Blueberry_local.usd` next to the originals.
 
 | # | Task | Notes |
 |---|---|---|
-| 1 | Greenhouse structure | 8×5×3 m box, glass walls (35% opacity), peaked roof (25°), corner pillars, sandy floor |
+| 1 | Greenhouse structure | 8×5×3 m, sandy floor, peaked roof, corner pillars; glass walls commented out for clear view |
 | 2 | G1 robot in scene | Spawned at hip z=0.74 m in default standing pose |
-| 3 | Understand G1 fall | PD gains tuned for locomotion policy, not passive balance — documented with fix options |
-| 4 | Kinematic root control | `write_root_pose_to_sim()` + `write_root_velocity_to_sim(zeros)` every frame |
-| 5 | Kinematic joint control | `write_joint_state_to_sim()` freezes pose; `torch.lerp` for smooth arm motion |
-| 6 | Bush asset discovery | Local OBJ→USD files in forest generator repo at `~/dev-bru/…/models/` |
-| 7 | Asset showcase tool | `tools/asset_showcase.py` — visual grid of all local USD plants |
-| 8 | Nucleus browser tool | `tools/browse_nucleus.py` — headless CLI to list Nucleus directories |
-| 9 | OBJ→USD converter | `tools/convert_bush_assets.py` — fixes Windows texture paths in .mtl files |
-| 10 | ContactSensor on G1 | All body links monitored; prints link name + force (N) when contact > 5 N |
-| 11 | RGB Camera on torso | 640×480, ~10 Hz, GPU tensor, ROS convention, faces forward — enabled with `--enable_cameras` |
-| 12 | Arm reach motion | `torch.lerp` ramps joints between default and reach pose smoothly over 60 frames |
-| 13 | State machine | WALK → REACH_IN → INSIDE → REACH_OUT → DONE, clean phase transitions with terminal logs |
-| 14 | Glass walls hidden | Commented out (not deleted) — 3 lines to restore full enclosure |
-| 15 | Single-bush focus | Simplified to 1 bush for physics debugging |
-| 16 | **Interactive bush** ✨ | Procedural: kinematic trunk + 10 dynamic sphere clusters connected via `UsdPhysics.Joint` spring D6 joints — clusters deflect on contact and spring back (stiffness=15 N·m/rad, damping=3) |
-| 17 | GitHub repo | Pushed to `github.com/bruXsavvytec/IsaacLab`, SSH key configured on server |
+| 3 | Understand G1 fall | PD gains tuned for locomotion policy — documented 4 fix options |
+| 4 | Kinematic root control | `write_root_pose_to_sim()` + zero velocity every frame |
+| 5 | Kinematic joint control | `write_joint_state_to_sim()` + `torch.lerp` for smooth arm motion |
+| 6 | Bush asset discovery | Local OBJ→USD in forest generator repo |
+| 7 | Asset showcase tool | `tools/asset_showcase.py` |
+| 8 | Nucleus browser tool | `tools/browse_nucleus.py` |
+| 9 | OBJ→USD converter | `tools/convert_bush_assets.py` — fixes Windows texture paths |
+| 10 | ContactSensor on G1 | All body links; prints link name + force (N) when contact > 5 N |
+| 11 | RGB Camera on torso | 640×480, ~10 Hz, GPU tensor; `--enable_cameras` flag required |
+| 12 | Arm reach motion | `torch.lerp` ramps joints over 60 frames |
+| 13 | Kinematic state machine | WALK → REACH_IN → INSIDE → REACH_OUT → DONE |
+| 14 | **Interactive spring bush** | Procedural trunk (kinematic) + 10 dynamic sphere clusters connected via `UsdPhysics.Joint` D6 spring joints. Clusters deflect on contact, spring back when released. Stiffness=15 N·m/rad, damping=3, limit=±60° |
+| 15 | GitHub repo | `github.com/bruXsavvytec/IsaacLab`, SSH key configured |
+| 16 | **Locomotion policy** | RSL-RL actor MLP loaded from checkpoint; 310-dim obs (IMU + joints + last action + zeros for height scan); 37-dim action scaled by 0.25; arms overridden during reach phases |
+| 17 | Phase-filtered contacts | Ankle/leg contacts suppressed during walk; only arm-phase contacts printed |
+| 18 | **YOLO integration** | `ultralytics` YOLOv8n on camera frames (~1 Hz); colour health analysis every frame (green vs stressed-yellow pixel ratio); inspection report printed at end of INSIDE phase |
+| 19 | Unhealthy plant sim | Clusters 3 and 7 coloured yellow/brown to simulate nitrogen deficiency and root stress |
+| 20 | **Plant Inspector window** | `omni.ui.ByteImageProvider` + `ImageWithProvider` → floating panel inside Isaac Sim; stressed pixels tinted red; YOLO boxes drawn with PIL; health HUD label |
 
 ### In Progress 🔄
 
-- [ ] **Verify contact sensor** — check terminal for `[CONTACT] '...' touching cluster` during INSIDE phase; if silent, add `PhysxContactReportAPI` to clusters
-- [ ] **Tune arm angles** — confirm hand visually enters upper clusters (z≈0.95 m); adjust `left_shoulder_roll_joint` (currently 2.0 rad) if needed
+- [ ] Tune `left_shoulder_roll_joint` (currently 2.0 rad) — confirm hand visually enters upper clusters (z≈0.95 m)
+
+### Known Broken / TODO 🔴
+
+- [ ] **Live camera preview window** — three approaches tried, all failed:
+  - `cv2.imshow()` → not implemented (Isaac Sim ships headless OpenCV, no GTK+)
+  - `omni.ui.ByteImageProvider` → window created but never visible in UI
+  - `feh --auto-reload /tmp/plant_inspector_latest.png` → saves PNG to disk (implemented), `feh` installed, but not yet confirmed working end-to-end
+  - **Next attempt:** use Isaac Sim's native Viewport 2 (`Window → Viewport → Viewport 2`, switch camera to `/World/G1/torso_link/insp_cam`) for raw feed; for annotated view consider a ROS topic or a proper omni.kit extension
 
 ### Next Up 📋
 
+**Soft bush:**
+- [ ] Deformable leaves via PhysX Particle Cloth — apply `PhysxParticleClothAPI` to leaf mesh prims in `Bush_local.usd` (run `convert_bush_assets.py` with `single_mesh=False` first to get per-material prims)
+
 **Scene completeness:**
-- [ ] Re-enable glass walls and roof once single-bush interaction is confirmed solid
-- [ ] Restore multi-bush grid — 2 rows × 6 plants, each fully interactive (same spring-joint setup)
-- [ ] Per-plant health state — each bush gets `{"healthy": bool, "inspected": bool}`; healthy = green clusters, sick = yellow/brown tint
+- [ ] Re-enable glass walls + roof once single-bush interaction is fully confirmed
+- [ ] Restore 2×6 bush grid — each with full spring-joint setup + per-bush health state dict
+- [ ] Per-plant health state: `{"healthy": bool, "inspected": bool}` — randomise at spawn
 
-**Vision:**
-- [ ] YOLO integration — pass `camera.data.output["rgb"]` (GPU tensor, shape `[1, 480, 640, 4]`) to `ultralytics` YOLO model; detect colour anomalies as proxy for plant disease
+**Locomotion refinement:**
+- [ ] Tune `WALK_VX` if robot drifts
+- [ ] Fine-tune arm override angle if hand misses clusters
 
-**Locomotion (new priority):**
-- [ ] **Find G1 locomotion checkpoint** — search `scripts/reinforcement_learning/` and Nucleus for a pre-trained G1 policy; reference implementation is `scripts/demos/h1_locomotion.py` (H1 version)
-- [ ] **Wire up G1 walking policy** — replace kinematic root glide with policy network: load checkpoint → observe IMU + joint state → output joint targets at 50 Hz → robot walks naturally
-- [ ] **Integrate policy with state machine** — policy runs during WALK phase; switch to arm-reach control when robot arrives at inspection position
-- [ ] **VLA model** (future) — Vision-Language-Action model for high-level task planning on top of the locomotion policy
-
-### Parallel / Background 📌
-
-- [ ] Deformable leaf physics — individual leaf movement requires rigged USD or PhysX FEM deformable body solver; explore as a research spike
-- [ ] Blueberry.usd in scene — scale always 5× bush scale; add alongside interactive bush once grid is restored
-- [ ] Texture fix — run `convert_bush_assets.py` if Bush.usd textures appear grey (Windows .mtl paths)
+**Future:**
+- [ ] VLA model — language prompt → action tokens on top of locomotion policy
 
 ---
 
 ## 6. What Has Been Built
 
-### 6.1 `greenhouse_sim.py` — Main Scene
+### 6.1 Interactive Spring Bush (`build_interactive_bush()`)
 
-**Scene layout (current):**
-- Greenhouse floor (8×5 m, sandy colour) + 4 corner pillars
-- Glass walls + roof **commented out** (easy to restore — see `build_greenhouse()`)
-- 1× Bush.usd at `(5.0, 0.70, 0.0)` — kinematic rigid body, collidable (70 cm from aisle centre — within G1 arm reach)
-- G1 humanoid spawned at `(2.5, 0.0, 0.74)`
+Replaces the old static `Bush.usd` with a fully procedural physics object:
 
-**Key constants (tune these):**
+```
+/World/Greenhouse/Plants/Bush/
+├── Trunk          kinematic cuboid (0.08×0.08×0.80 m, brown)
+├── Cluster_0…9    dynamic spheres, r=0.13–0.14 m
+│   (indices 3,7 are yellow → simulated disease)
+└── Joint_0…9      UsdPhysics.Joint D6 spring joints
+```
+
+**Joint physics per cluster:**
+```python
+# Translation: all 3 axes locked → cluster can only rotate, not slide
+# Rotation rotX, rotY: ±60° swing limit + spring drive
+#   torque = stiffness * (0 - current_angle) - damping * angular_vel
+# Rotation rotZ: locked (no twist)
+
+stiffness = 15.0   # N·m/rad — spring-back torque per radian
+damping   =  3.0   # N·m·s/rad — kills oscillation
+limit     = 60.0   # degrees max swing
+mass      =  0.05  # kg per cluster
+```
+
+**Joint anchor math:**
+```python
+# Pivot placed at trunk top: world pos = (bx, by, TRUNK_HEIGHT=0.80)
+# LocalPos0 (on trunk) = (0, 0, trunk_z)          # trunk origin → trunk top
+# LocalPos1 (on cluster) = (-dx, -dy, 0.80 - dz)  # cluster origin → trunk top
+# At rest both frames coincide at (bx, by, 0.80) in world space
+```
+
+### 6.2 Locomotion Policy (`greenhouse_locomotion.py`)
+
+Bypasses `OnPolicyRunner` entirely — loads only the actor MLP:
 
 ```python
-_BUSH_POS    = (5.0, 0.70, 0.0)  # 70 cm to robot's left — within G1 arm reach
-_ROBOT_START = (2.5, 0.0, 0.74)  # robot spawn
-_INSPECT_POS = (5.0, 0.0, 0.74)  # robot stops to interact
+# Old RSL-RL (< 4.0) checkpoint format:
+# ckpt["model_state_dict"]["actor.0.weight"], ["actor.0.bias"], ...
+# Network: 310 → 512 → 256 → 128 → 37 (ELU activations)
 
-RAMP_FRAMES  = 60    # frames to extend / retract arm  (0.6 s at dt=0.01)
-HOLD_FRAMES  = 80    # frames with arm inside the bush  (0.8 s)
-MOVE_SPEED   = 0.6   # m/s
+dims = [310, 512, 256, 128, 37]
+layers = []
+for i, (in_d, out_d) in enumerate(zip(dims[:-1], dims[1:])):
+    layers.append(nn.Linear(in_d, out_d))
+    if i < 3:   # 3 hidden layers
+        layers.append(nn.ELU())
+actor = nn.Sequential(*layers)
 
-# Tune these angles if hand doesn't reach the bush or clips the torso.
-# G1 arm reach: shoulder offset ~0.22 m + arm length ~0.62 m at 90° roll ≈ 0.84 m total Y.
-# Bush at Y=0.70 gives ~14 cm of clearance — hand should enter comfortably.
-_REACH_JOINTS = {
-    "left_shoulder_roll_joint":  1.57,   # 90° abduction — arm straight out to the side
-    "left_shoulder_pitch_joint": 0.10,   # slight forward tilt for height alignment
-    "left_elbow_pitch_joint":    0.05,   # nearly fully extended (do NOT go negative)
-    "left_one_joint":  0.0,             # open hand
-    "left_two_joint":  0.0,
-}
+actor_sd = {k[len("actor."):]: v
+            for k, v in ckpt["model_state_dict"].items()
+            if k.startswith("actor.")}
+actor.load_state_dict(actor_sd)
 ```
 
-**State machine:**
+**310-dim observation layout:**
 
-```
-WALK      robot glides from _ROBOT_START → _INSPECT_POS at MOVE_SPEED
-REACH_IN  left arm interpolates default_pose → reach_pose over RAMP_FRAMES
-INSIDE    arm holds at full reach for HOLD_FRAMES
-REACH_OUT arm interpolates reach_pose → default_pose over RAMP_FRAMES
-DONE      robot stands still, viewport live (Ctrl+C to quit)
-```
+| Slice | Content | Dim |
+|---|---|---|
+| `[0:3]` | `root_lin_vel_b` — body-frame linear velocity | 3 |
+| `[3:6]` | `root_ang_vel_b` — body-frame angular velocity | 3 |
+| `[6:9]` | `projected_gravity_b` — gravity in body frame | 3 |
+| `[9:12]` | velocity command `[vx, vy, wz]` | 3 |
+| `[12:49]` | `joint_pos - default_joint_pos` | 37 |
+| `[49:86]` | `joint_vel` | 37 |
+| `[86:123]` | `last_action` | 37 |
+| `[123:310]` | height scan → **zeros** (flat floor) | 187 |
 
-**To restore glass walls**, un-comment these lines in `build_greenhouse()`:
+**Arm override during reach phases:**
 ```python
-# _spawn_box("/World/Greenhouse/WallFront", ...)
-# _spawn_box("/World/Greenhouse/WallBack",  ...)
-# _spawn_box("/World/Greenhouse/WallLeft",  ...)
-# _spawn_box("/World/Greenhouse/WallRight", ...)
-# _spawn_box("/World/Greenhouse/RoofFront", ...)
-# _spawn_box("/World/Greenhouse/RoofBack",  ...)
-# _spawn_box("/World/Greenhouse/Ridge",     ...)
+# Back-solve: joint_target = default + scale * action
+# → action[idx] = (desired_angle - default_angle) / ACTION_SCALE
+ACTION_SCALE = 0.25
+for jname in _REACH_JOINTS:
+    idx = name_to_idx[jname]
+    action[0, idx] = (interp[0, idx] - default_jpos[0, idx]) / ACTION_SCALE
+# Policy still runs for leg joints → robot stays balanced while arm moves
 ```
 
-### 6.2 `tools/asset_showcase.py`
+### 6.3 YOLO + Plant Inspector
 
-Spawns a grid of USD assets so you can visually inspect and choose which to use. Runs in GUI mode only. Prints prim paths and scale to terminal.
+```
+Camera → (1,480,640,4) RGBA GPU tensor
+         ↓
+rgb_np = tensor[0,:,:,:3].cpu().numpy()   # (480,640,3) RGB
+         ↓
+_analyze_health()        ← every frame, cheap numpy
+  green mask: G > 0.20, G > R*1.35, G > B*1.35
+  stressed mask: R>0.28, G>0.28, G < R*1.20, B<0.25
+         ↓
+YOLOv8n inference        ← every 10 calls (~1 s)
+  input: rgb_np[:,:,::-1]  (RGB→BGR)
+  output: boxes with cls, conf, xyxy
+         ↓
+_show_preview()          ← every frame with new camera data
+  1. Tint stressed pixels red (numpy blend)
+  2. Draw YOLO boxes with PIL ImageDraw (cached between runs)
+  3. Push RGBA bytes → omni.ui.ByteImageProvider
+  4. Update label text
+```
 
-### 6.3 `tools/browse_nucleus.py`
-
-CLI tool to list NVIDIA Nucleus directories without opening the full Isaac Sim UI.  
-Runs headless. Useful for discovering what vegetation assets Nucleus has.
-
-### 6.4 `tools/convert_bush_assets.py`
-
-Uses `omni.kit.asset_converter` to re-convert `.obj` files to USD, fixing Windows-style texture paths embedded in `.mtl` files. Output is `Bush_local.usd` and `Blueberry_local.usd`.
+**Why `omni.ui` not `cv2.imshow()`:**  
+The OpenCV bundled in Isaac Sim's Python env is a **headless build** (no GTK+/Qt GUI support). `cv2.imshow()` raises `error: (-2) The function is not implemented`. Use `omni.ui.ByteImageProvider` instead — it renders inside Isaac Sim's own Qt window.
 
 ---
 
-## 7. Architecture & State Machine
+## 7. Architecture & Key Patterns
 
-### 7.1 Typical Script Skeleton
-
-Every IsaacLab script follows this strict ordering:
+### 7.1 Script Skeleton
 
 ```python
-# 1. Parse args + boot Isaac Sim (MUST be first)
+# 1. Boot (must be first)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-# 2. Import everything AFTER boot
+# 2. All imports after boot
+import numpy as np
+import torch
 import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim import SimulationContext
 
-# 3. Configure physics world
-sim_cfg = sim_utils.SimulationCfg(dt=0.01, device="cuda:0",
+# 3. Physics world
+sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device,
                                    render=sim_utils.RenderCfg(rendering_mode="quality"))
 sim = SimulationContext(sim_cfg)
 
 # 4. Populate scene (before sim.reset())
-def design_scene():
-    sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
-    robot = Articulation(cfg=G1_CFG.replace(prim_path="/World/G1"))
-    return robot
+def design_scene(): ...
 
-robot = design_scene()
-
-# 5. Start physics engine (triggers sensor + articulation initialisation)
+# 5. Start physics
 sim.reset()
 
 # 6. Main loop
 while simulation_app.is_running():
-    robot.write_root_pose_to_sim(pose)
-    robot.write_joint_state_to_sim(jpos, jvel)
     robot.write_data_to_sim()
     sim.step()
     robot.update(sim_dt)
+    contact_sensor.update(sim_dt)
 ```
 
-### 7.2 Kinematic Control Explained
+### 7.2 Kinematic vs Policy Control
 
-The G1 is **not** using physics-based balance. Instead:
+| Mode | Root | Joints | File |
+|---|---|---|---|
+| Kinematic | `write_root_pose_to_sim()` every frame | `write_joint_state_to_sim()` every frame | `greenhouse_sim.py` |
+| Policy | Free-floating (physics) | `set_joint_position_target()` → PD actuators | `greenhouse_locomotion.py` |
 
-| Call | Effect |
-|---|---|
-| `write_root_pose_to_sim(pose)` | Teleports pelvis to exact (x, y, z, quat) every frame |
-| `write_root_velocity_to_sim(zeros)` | Sets root velocity to zero — prevents physics drift |
-| `write_joint_state_to_sim(jpos, jvel)` | Sets all joint angles directly, bypassing PD actuators |
+### 7.3 Contact Sensor
 
-This makes the robot behave like a moving mannequin: perfectly stable, no dynamics, but no real physics feedback either.
-
-### 7.3 Bush Physics Setup
-
-`Bush.usd` is an OBJ→USD conversion with **no physics APIs pre-baked**.  
-Isaac Lab's `UsdFileCfg.rigid_props` calls `modify_rigid_body_properties()`, which only *edits* existing rigid bodies — it **cannot create** them.
-
-The fix (in `_apply_bush_physics()`):
 ```python
-# Step 1: apply RigidBodyAPI to root prim (makes it a physics actor)
-sim_utils.define_rigid_body_properties(prim_path,
-    sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True))
-
-# Step 2: apply CollisionAPI to every Mesh descendant
-for child in Usd.PrimRange(root):       # correct USD subtree traversal
-    if child.IsA(UsdGeom.Mesh):
-        sim_utils.define_collision_properties(child.GetPath().pathString, coll_cfg)
+ContactSensorCfg(prim_path="/World/G1/.*", update_period=0.0, history_length=1)
+# sensor.data.net_forces_w: (1, N_bodies, 3)
+# G1_MINIMAL_CFG has activate_contact_sensors=True → all links get PhysxContactReportAPI
 ```
 
-Key distinction: **`modify_*`** vs **`define_*`**
-
-| Function | Behaviour |
-|---|---|
-| `modify_rigid_body_properties` | Edits existing rigid body — returns `False` silently if no `RigidBodyAPI` present |
-| `define_rigid_body_properties` | Creates `RigidBodyAPI` if absent, then sets properties |
-| `modify_collision_properties` | Edits existing collider — no-op if no `CollisionAPI` |
-| `define_collision_properties` | Creates `CollisionAPI` if absent, then sets properties |
-
-### 7.4 Contact Sensor
+### 7.4 Camera
 
 ```python
-contact_sensor = ContactSensor(cfg=ContactSensorCfg(
-    prim_path="/World/G1/.*",   # regex → all G1 body links
-    update_period=0.0,           # every physics step
-    history_length=1,
-    debug_vis=False,
-))
-```
-
-- `G1_CFG` has `activate_contact_sensors=True` → all G1 links get `PhysxContactReportAPI`
-- No `filter_prim_paths_expr` — filtering requires `PhysxContactReportAPI` on the filtered objects too; Bush.usd doesn't have this unless we add it after applying `define_rigid_body_properties`
-- `sensor.data.net_forces_w` — shape `(1, N_bodies, 3)` — total force on each G1 link
-
-### 7.5 RGB Camera
-
-```python
-camera = Camera(cfg=CameraCfg(
+CameraCfg(
     prim_path="/World/G1/torso_link/insp_cam",
     spawn=sim_utils.PinholeCameraCfg(focal_length=8.5, clipping_range=(0.1, 30.0)),
-    offset=CameraCfg.OffsetCfg(
-        pos=(0.1, 0.0, 0.25),
-        rot=(0.7071, 0.0, 0.7071, 0.0),  # +90° around Y → looks along robot +X
-        convention="ros",
-    ),
-    height=480, width=640,
-    data_types=["rgb"],
-    update_period=0.1,   # ~10 Hz
-))
+    offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.25), rot=(0.7071, 0, 0.7071, 0), convention="ros"),
+    height=480, width=640, data_types=["rgb"], update_period=0.1,
+)
+# camera.data.output["rgb"] → (1, 480, 640, 4) RGBA uint8 GPU tensor
+# Requires --enable_cameras flag
 ```
-
-Access the GPU tensor each step:
-```python
-rgb = camera.data.output["rgb"]   # torch.Tensor (480, 640, 4) RGBA, uint8, on GPU
-# Pass directly to YOLO:
-# results = yolo_model(rgb[..., :3])
-```
-
-Requires `--enable_cameras` flag to render.
 
 ---
 
 ## 8. Key Technical Learnings & Gotchas
 
-### USD Python API
+### `UsdPhysics.D6Joint` does not exist
 
-| Wrong | Correct |
-|---|---|
-| `prim.GetAllDescendants()` ❌ — does not exist | `Usd.PrimRange(prim)` ✅ — yields root + all descendants |
-| `prim.GetChildren()` for subtree ❌ — direct children only | `Usd.PrimRange(prim)` ✅ |
+```python
+# WRONG — raises AttributeError in Isaac Sim 4.x
+d6 = UsdPhysics.D6Joint.Define(stage, path)
 
-### Physics Schema Creation
-
-> **`activate_contact_sensors=True` on a `UsdFileCfg` for an OBJ-converted USD will raise:**
-> ```
-> ValueError: No contact sensors added to the prim '...'.
-> This means that no rigid bodies are present under this prim.
-> ```
-> **Root cause:** The OBJ→USD pipeline produces visual-only meshes with no `UsdPhysics.RigidBodyAPI`. `activate_contact_sensors()` walks the prim tree looking for rigid bodies and finds none.  
-> **Fix:** Call `define_rigid_body_properties()` first to apply the API, then optionally `activate_contact_sensors()`.
-
-### filter_prim_paths_expr in ContactSensorCfg
-
-Internally converts `.*` → `*` (glob), so regex patterns work.  
-But the filtered objects **must have `PhysxContactReportAPI`** — i.e. they must already be rigid bodies with contact reporting enabled. If the bush hasn't been through `activate_contact_sensors()`, the filter produces an empty contact view (no error, just silent misses).
-
-### Why G1 Falls Without a Policy
-
-```
-torque = Kp × (target_pos − current_pos) − Kd × current_vel
+# CORRECT — generic Joint IS the D6 joint in this pxr version
+d6 = UsdPhysics.Joint.Define(stage, path)
+# All LimitAPI / DriveAPI calls are identical either way
 ```
 
-At t=0, positions match targets → zero torque → gravity immediately wins.  
-`G1_CFG` gains (Kp=150–200, Kd=5) are tuned for a **running locomotion policy**, not passive balance.  
-Solutions (simplest to hardest):
-1. `fix_root_link = True` — pins pelvis to world
-2. `write_root_pose_to_sim()` every frame — kinematic teleport
-3. Much higher PD gains (Kp ≥ 500) — better passive stability, still falls
-4. Pre-trained locomotion policy — the real solution
+### Inference tensor in-place write error
 
-### UsdFileCfg.rigid_props Silently Fails for Visual-Only USDs
+```python
+# WRONG — action is an inference tensor inside the context manager
+with torch.inference_mode():
+    action = policy(obs)
+action[0, idx] = value   # RuntimeError: Inplace update to inference tensor
 
-`UsdFileCfg.rigid_props` uses `modify_rigid_body_properties()` which returns `False` (no-op + warning) if the prim has no `UsdPhysics.RigidBodyAPI`. No exception is raised. Use `define_rigid_body_properties()` instead.
+# CORRECT — clone immediately after the with block
+with torch.inference_mode():
+    action = policy(obs)
+action = action.clone()          # now a normal tensor
+last_action = action.clone()
+action[0, idx] = value           # in-place write works
+```
 
-### configclass `.copy()` is a Shallow Copy
+### Headless OpenCV — `cv2.imshow()` not implemented
+
+The Isaac Sim Python env ships OpenCV **without GUI support** (`highgui` compiled without GTK+/Qt).  
+`cv2.imshow()` raises `error: (-2) The function is not implemented`.  
+**Use `omni.ui.ByteImageProvider` instead** — it is always available inside Isaac Sim.
+
+```python
+import omni.ui as ui
+provider = ui.ByteImageProvider()
+provider.set_bytes_data(bytes(W * H * 4), [W, H])   # initial blank
+win = ui.Window("My Window", width=W+20, height=H+52)
+with win.frame:
+    with ui.VStack():
+        ui.ImageWithProvider(provider, width=W, height=H)
+        label = ui.Label("status text")
+
+# Each frame: push RGBA bytes
+rgba = np.zeros((H, W, 4), dtype=np.uint8)
+rgba[:,:,:3] = rgb_frame; rgba[:,:,3] = 255
+provider.set_bytes_data(rgba.tobytes(), [W, H])
+```
+
+### `configclass.copy()` is shallow
 
 ```python
 robot_cfg = G1_CFG.copy()
-robot_cfg.init_state.pos = _ROBOT_START  # mutates G1_CFG.init_state too!
-```
+robot_cfg.init_state.pos = _ROBOT_START   # ALSO mutates G1_CFG.init_state!
 
-`configclass.copy()` calls `dataclasses.replace()` which does a shallow copy — nested objects are shared. Mutating `init_state.pos` also mutates the original `G1_CFG`. Use `.replace()` with nested replace for safety:
-```python
+# Safe pattern:
 robot_cfg = G1_CFG.replace(
     prim_path="/World/G1",
     init_state=G1_CFG.init_state.replace(pos=_ROBOT_START)
 )
 ```
 
-### OBJ→USD Texture Paths on Linux
+### USD Python subtree traversal
 
-`Bush.mtl` contains Windows absolute paths:
+```python
+# WRONG — method does not exist
+prim.GetAllDescendants()
+
+# CORRECT
+from pxr import Usd
+for child in Usd.PrimRange(prim):   # yields root + all descendants
+    if child.IsA(UsdGeom.Mesh): ...
 ```
-map_Kd D:\temp_downloads\...\textures\Branches_08.jpg
+
+### Physics API: `modify_*` vs `define_*`
+
+| Function | Behaviour |
+|---|---|
+| `modify_rigid_body_properties` | Edits existing RigidBodyAPI — **silent no-op** if none present |
+| `define_rigid_body_properties` | Creates RigidBodyAPI if absent, then sets properties |
+
+Always use `define_*` when adding physics to assets converted from OBJ.
+
+### Why G1 Falls Without a Policy
+
 ```
-The binary `Bush.usdc` may embed relative paths (working) or Windows paths (broken). If the bush renders as grey/white, run `convert_bush_assets.py` and switch to `Bush_local.usd`.
+torque = Kp × (target_pos − current_pos) − Kd × current_vel
+```
+At t=0 positions match targets → zero torque → gravity wins immediately.  
+`G1_CFG` gains (Kp=150–200, Kd=5) are tuned for a running policy, not passive balance.
 
-### Leaf Movement Physics
-
-**Individual leaf movement is not possible** with the current setup.  
-The OBJ-converted Bush.usd is a single rigid body — trunk + branches + leaves all move together.  
-To get leaf deflection you need either:
-- A **deformable body** (PhysX FEM solver) — requires deformable mesh USD format
-- A **rigged asset** with an animation graph driven by contact forces
-- PhysX cloth for flat leaf planes
+Fix options (simplest → hardest):
+1. `fix_root_link = True` — pins pelvis to world
+2. `write_root_pose_to_sim()` every frame — kinematic teleport
+3. Higher PD gains (Kp ≥ 500) — still falls eventually
+4. Pre-trained locomotion policy — the real solution ✅
 
 ---
 
@@ -545,100 +537,110 @@ To get leaf deflection you need either:
 
 | Limitation | Cause | Planned Fix |
 |---|---|---|
-| Robot walks through walls if root is kinematic | Kinematic root ignores collision | Re-enable walls + add collision to greenhouse geometry |
-| Leaves don't move when arm enters bush | Single rigid-body bush, no deformable solver | Use rigged asset or PhysX deformable |
-| No bush-specific contact filter | Bush needs `PhysxContactReportAPI` first | Call `activate_contact_sensors()` after `_apply_bush_physics()` |
-| Camera renders only with `--enable_cameras` | Isaac Sim renderer disabled in default headless mode | Always pass `--enable_cameras` when you need RGB frames |
-| Arm may not reach bush center exactly | Joint angles approximate, depend on G1 segment lengths | Tune `_REACH_JOINTS` values after visual inspection |
-| Glass walls are not collidable | `CuboidCfg` spawns visual-only prims by default | Add `collision_props` + `rigid_props` to `_spawn_box()` |
+| Clusters are spheres, not real leaves | Procedural geometry — no USD leaf mesh | Deformable cloth on real Bush.usd leaf prims |
+| Camera may not frame the bush well during INSIDE | Camera on torso facing forward; bush is to the side | Mount second camera on the wrist/hand |
+| YOLO detects COCO classes (ball, person) not plants | YOLOv8n trained on COCO, no plant disease classes | Fine-tune on plant disease dataset (PlantVillage) |
+| Colour health analysis is a heuristic | Simple RGB channel ratio, not a real model | Fine-tuned YOLO or segmentation model |
+| Glass walls not collidable | `CuboidCfg` spawns visual-only prims | Add `collision_props` to `_spawn_box()` |
+| Height scan = zeros (flat floor assumption) | Policy was trained on rough terrain | Robot still walks — good enough for flat greenhouse |
 
 ---
 
 ## 10. Roadmap
 
-### Phase 1 — Scripted Interaction (Current)
+### Phase 1 — Scripted Interaction ✅ COMPLETE
 - [x] Kinematic walk + arm reach state machine
-- [x] Single-bush scene for debugging
-- [ ] Tune arm joints to reliably reach bush center
-- [ ] Re-enable glass walls + add collision to walls
+- [x] Procedural interactive spring bush
+- [x] Contact sensor (phase-filtered)
 
-### Phase 2 — Sensing
-- [ ] Per-bush contact filter (apply `PhysxContactReportAPI` post-`define_rigid_body_properties`)
-- [ ] YOLO integration — `ultralytics` model on `camera.data.output["rgb"]` tensor
-- [ ] Healthy/sick plant state — randomise per-plant, detect via YOLO label
-- [ ] Restore multi-bush grid (2 rows × 6 columns)
+### Phase 2 — Sensing ✅ COMPLETE
+- [x] RGB camera sensor on torso
+- [x] YOLO integration (YOLOv8n)
+- [x] Colour-based health analysis (green vs yellow pixel ratio)
+- [x] Plant Inspector window (omni.ui)
+- [x] Simulated unhealthy clusters (yellow colour)
 
-### Phase 3 — Real Locomotion
-- [ ] Find/download pre-trained G1 locomotion checkpoint (reference: `h1_locomotion.py`)
-- [ ] Replace kinematic root with locomotion policy output
-- [ ] Handle transitions: loco policy → arm reach → loco policy (hierarchy)
+### Phase 3 — Real Locomotion ✅ COMPLETE
+- [x] Pre-trained RSL-RL G1 policy loaded from checkpoint
+- [x] Policy drives legs; arm override during reach phases
+- [x] Full WALK → ARRIVE → REACH_IN → INSIDE → REACH_OUT → DONE cycle
 
-### Phase 4 — VLA
-- [ ] Connect VLA model (language prompt → action tokens)
-- [ ] Task: "Inspect all bushes and report sick ones"
-- [ ] Data collection pipeline (record demos → imitation learning)
+### Phase 4 — Soft Bush (Next)
+- [ ] Run `convert_bush_assets.py` with `single_mesh=False` to get per-material USD prims
+- [ ] Apply `PhysxParticleClothAPI` to leaf prims
+- [ ] Apply `PhysxAutoAttachmentAPI` to attach leaves to branch rigid bodies
+
+### Phase 5 — Full Scene
+- [ ] 2×6 bush grid, each with spring joints + health state
+- [ ] Per-bush inspection log — record which plants are stressed
+- [ ] Re-enable glass walls + collision
+
+### Phase 6 — VLA (Future)
+- [ ] Connect VLA model: language prompt → action tokens
+- [ ] Task: "Walk to each bush, inspect, report sick ones"
+- [ ] Data collection pipeline (demo recording → imitation learning)
 
 ---
 
 ## 11. Asset Catalogue
 
-### Locally Available (Forest Generator Repo)
+### Local (Forest Generator Repo)
 
-| Asset | USD Path | Notes |
+| Asset | Path | Notes |
 |---|---|---|
-| Bush | `…/Bush_obj/Bush.usd` | Scale 1.0 — confirmed good visually |
-| Blueberry | `…/Blueberry_obj/Blueberry.usd` | Scale 5.0 (always 5× bush scale) |
-| Birch | `…/Birch_obj/Birch.usd` | Tree, scale ~0.15 |
-| Pine | `…/Pine_obj/Pine.usd` | Tree, scale ~0.15 |
-| Spruce | `…/Spruce_obj/Spruce.usd` | Tree, scale ~0.15 |
-| Maple | `…/maple_obj/maple.usd` | Tree, scale ~0.15 |
-| Rock | `…/Rock_obj/Rock.usd` | Ground detail |
-| BigRock | `…/Rock_obj/big_rock.usd` | Ground detail |
+| Bush | `…/Bush_obj/Bush.usd` | Scale 1.0 |
+| Blueberry | `…/Blueberry_obj/Blueberry.usd` | Scale 5.0 |
+| Birch / Pine / Spruce / Maple | `…/*/` | Trees, scale ~0.15 |
+| Rock / BigRock | `…/Rock_obj/` | Ground detail |
 
-All assets have Windows-path texture references in their `.mtl` files. Run `convert_bush_assets.py` if textures appear grey/white.
+All have Windows-path `.mtl` texture references — run `convert_bush_assets.py` if textures appear grey.
 
 ### Bundled with Isaac Sim
 
-| Asset | USD Path |
+| Asset | Path |
 |---|---|
-| Pot Plant | `/home/trooperai/isaac-env/lib/python3.10/…/data/usd/assets/pot_plant.usda` |
-
-### Nucleus Cloud
-
-No `NVIDIA/Assets/Vegetation` folder found on this system's Nucleus connection.  
-Use `browse_nucleus.py` to check: `./isaaclab.sh -p scripts/tools/browse_nucleus.py`
+| Pot Plant | `…/isaac-env/…/data/usd/assets/pot_plant.usda` |
 
 ---
 
-## Quick Reference — Common Patterns
+## Quick Reference
 
 ```python
-# Spawn a kinematic collidable USD (e.g. a plant)
-bush_cfg = sim_utils.UsdFileCfg(usd_path="...", scale=(1.0, 1.0, 1.0))
-bush_cfg.func("/World/Bush", bush_cfg, translation=(x, y, 0.0))
-# Then apply physics manually:
-sim_utils.define_rigid_body_properties("/World/Bush",
-    sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True))
-for child in Usd.PrimRange(stage.GetPrimAtPath("/World/Bush")):
-    if child.IsA(UsdGeom.Mesh):
-        sim_utils.define_collision_properties(child.GetPath().pathString,
-            sim_utils.CollisionPropertiesCfg(collision_enabled=True))
+# Interactive bush: check spring joint constants
+_SPRING_STIFFNESS = 15.0   # N·m/rad — increase for stiffer response
+_SPRING_DAMPING   =  3.0   # N·m·s/rad — increase to kill oscillation faster
+_SWING_LIMIT_DEG  = 60.0   # max deflection angle
+_CLUSTER_MASS     =  0.05  # kg — decrease for easier deflection
 
-# Walk a USD subtree (correct API)
-from pxr import Usd, UsdGeom
-for child in Usd.PrimRange(root_prim):       # NOT root_prim.GetAllDescendants()
-    if child.IsA(UsdGeom.Mesh):
-        ...
+# Locomotion policy: tune these
+WALK_VX          = 0.8    # forward speed command (m/s)
+ARRIVE_THRESH    = 0.10   # stop threshold (m) from target X
+STABILISE_FRAMES = 50     # frames to let robot decelerate
+ACTION_SCALE     = 0.25   # must match training — do not change
 
-# Interpolate between two joint poses (smooth arm motion)
-alpha    = frame / RAMP_FRAMES               # 0.0 → 1.0
+# Arm reach: tune if hand misses clusters
+_REACH_JOINTS = {
+    "left_shoulder_roll_joint":  2.00,   # 115° — arm out and down
+    "left_shoulder_pitch_joint": 0.00,
+    "left_elbow_pitch_joint":    0.05,
+}
+
+# Push a frame to the Plant Inspector window
+rgba = np.zeros((H, W, 4), dtype=np.uint8)
+rgba[:, :, :3] = rgb_frame_np
+rgba[:, :, 3]  = 255
+_image_provider.set_bytes_data(rgba.tobytes(), [W, H])
+
+# Smooth joint interpolation
+alpha    = min(frame / RAMP_FRAMES, 1.0)   # 0.0 → 1.0
 cur_jpos = torch.lerp(default_jpos, reach_jpos, alpha)
 
-# Read contact force on robot body links
-forces = contact_sensor.data.net_forces_w    # (1, N_bodies, 3)
-max_f  = forces.norm(dim=-1).max().item()    # scalar N
+# USD subtree traversal
+from pxr import Usd, UsdGeom
+for prim in Usd.PrimRange(root_prim):
+    if prim.IsA(UsdGeom.Mesh): ...
 ```
 
 ---
 
-*Last updated: 2026-05-21 | Maintained by: trooperai*
+*Last updated: 2026-05-22 | Maintained by: trooperai / p.miltrup@savvytec.de*
