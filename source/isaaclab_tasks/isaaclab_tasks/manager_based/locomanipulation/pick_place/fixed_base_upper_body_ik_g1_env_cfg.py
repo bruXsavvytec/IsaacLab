@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+import os
+
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -33,6 +35,27 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
 
 
 ##
+# Local asset override
+##
+# Some assets for this task are only published in the Isaac 5.0 cloud bucket and
+# are missing from the 4.5 bucket. On an Isaac Sim 4.5 install they 404, so we
+# bundle local copies and prefer them. Override the directory with the
+# LOCOMANIP_PICKPLACE_ASSET_DIR env var. Falls back to Nucleus when no local copy
+# exists (e.g. after upgrading to Isaac Sim 5.0).
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardir] * 6)))
+_LOCAL_ASSET_DIR = os.environ.get(
+    "LOCOMANIP_PICKPLACE_ASSET_DIR",
+    os.path.join(_REPO_ROOT, "assets_local", "locomanip_pickplace"),
+)
+
+
+def _local_or_nucleus(local_name: str, nucleus_path: str) -> str:
+    """Return an absolute local asset path if it exists, else the Nucleus path."""
+    local = os.path.join(_LOCAL_ASSET_DIR, local_name)
+    return local if os.path.isfile(local) else nucleus_path
+
+
+##
 # Scene definition
 ##
 @configclass
@@ -58,7 +81,10 @@ class FixedBaseUpperBodyIKG1SceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Object",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            usd_path=_local_or_nucleus(
+                "steering_wheel.usd",
+                f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            ),
             scale=(0.75, 0.75, 0.75),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
@@ -192,9 +218,12 @@ class FixedBaseUpperBodyIKG1EnvCfg(ManagerBasedRLEnvCfg):
 
         # Set the URDF and mesh paths for the IK controller
         urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
+        urdf_path = _local_or_nucleus("g1_29dof_with_hand_only_kinematics.urdf", urdf_omniverse_path)
 
-        # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
-        self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
+        # Prefer the bundled local URDF; otherwise download it from Nucleus (cached after first call).
+        self.actions.upper_body_ik.controller.urdf_path = (
+            urdf_path if os.path.isfile(urdf_path) else retrieve_file_path(urdf_path)
+        )
 
         self.teleop_devices = DevicesCfg(
             devices={

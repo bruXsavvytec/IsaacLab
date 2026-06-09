@@ -373,10 +373,10 @@ robot        = scene["robot"]
 contact_sens = scene["contact_sensor"]
 camera       = scene.get("camera")
 
+sim.reset()
+
 if _groot_runner is not None:
     _groot_runner.bind_robot(robot.joint_names)
-
-sim.reset()
 
 device      = sim.device
 policy      = load_policy(device)

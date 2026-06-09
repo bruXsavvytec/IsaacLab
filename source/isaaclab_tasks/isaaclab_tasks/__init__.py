@@ -33,7 +33,8 @@ __version__ = ISAACLAB_TASKS_METADATA["package"]["version"]
 from .utils import import_packages
 
 # The blacklist is used to prevent importing configs from sub-packages
-# TODO(@ashwinvk): Remove pick_place from the blacklist once pinocchio from Isaac Sim is compatibility
-_BLACKLIST_PKGS = ["utils", ".mdp", "pick_place", "direct.humanoid_amp.motions"]
+# NOTE: pick_place was previously blacklisted due to pinocchio/numpy incompatibility.
+# With numpy<2 installed, pinocchio 2.7.0 + pink import cleanly, so it is re-enabled here.
+_BLACKLIST_PKGS = ["utils", ".mdp", "direct.humanoid_amp.motions"]
 # Import all configs in this package
 import_packages(__name__, _BLACKLIST_PKGS)

@@ -10,12 +10,19 @@ on what the camera sees and a language instruction.
 
 ```
 scripts/vla/
-├── main.py            — entry point, full sim loop + state machine
-├── groot_runner.py    — Phase 2: GR00T N1.7-3B wrapper (server + direct mode)
-├── planner.py         — Phase 1: Claude API high-level planner
-├── action_space.py    — shared enums (InspectionAction, VLAMode)
-└── README.md          — this file
+├── main.py                  — entry point, full sim loop + state machine
+├── groot_runner.py          — Phase 2: GR00T N1.7-3B wrapper (server + direct mode)
+├── planner.py               — Phase 1: Claude API high-level planner
+├── action_space.py          — shared enums (InspectionAction, VLAMode)
+├── requirements-groot.txt   — optional deps for --vla-mode groot
+├── requirements-claude.txt  — optional deps for --vla-mode claude
+└── README.md                — this file
 ```
+
+**Dependencies are per-backend (optional).** The default `--vla-mode scripted`
+needs nothing beyond Isaac Sim. `groot` and `claude` each pull in their own extras
+(see Installation below). Heavy packages (torch / transformers / numpy / opencv) are
+deliberately left to Isaac Sim — the requirements files do not pin them.
 
 External repos:
 ```
@@ -89,7 +96,7 @@ cd /home/trooperai/Isaac-GR00T
 python gr00t/eval/run_gr00t_server.py \
     --model-path nvidia/GR00T-N1.7-3B \
     --embodiment-tag REAL_G1 \
-    --server-port 5555
+    --port 5555
 ```
 
 Terminal 2 — run sim (connects to server automatically, no model reload):
@@ -150,29 +157,11 @@ echo "/home/trooperai/Isaac-GR00T" > \
 
 ### 3. Install dependencies into Isaac Sim env
 
+Use the requirements file (the non-conflicting subset of GR00T's deps — torch /
+transformers / numpy / opencv are left to Isaac Sim):
+
 ```bash
-/home/trooperai/isaac-env/bin/pip install \
-    "tyro==0.9.17" \
-    "typeguard==3.0.2" \
-    "dm-tree" \
-    "albumentations==1.4.18" \
-    "av==16.1.0" \
-    "diffusers==0.35.1" \
-    "lmdb==1.7.5" \
-    "msgpack==1.1.0" \
-    "msgpack-numpy==0.4.8" \
-    "pandas==2.2.3" \
-    "peft==0.17.1" \
-    "termcolor==3.2.0" \
-    "click==8.1.8" \
-    "einops==0.8.1" \
-    "jsonlines==4.0.0" \
-    "omegaconf==2.3.0" \
-    "scipy==1.15.3" \
-    "pyzmq==27.0.1" \
-    "gymnasium==1.2.2" \
-    "gitpython==3.1.46" \
-    "boto3"
+/home/trooperai/isaac-env/bin/pip install -r scripts/vla/requirements-groot.txt
 ```
 
 ### 4. Verify
@@ -180,6 +169,15 @@ echo "/home/trooperai/Isaac-GR00T" > \
 ```bash
 /home/trooperai/isaac-env/bin/python -c \
     "from gr00t.policy import Gr00tPolicy; print('gr00t OK')"
+```
+
+---
+
+### Claude backend (`--vla-mode claude`) — separate optional extra
+
+```bash
+/home/trooperai/isaac-env/bin/pip install -r scripts/vla/requirements-claude.txt
+export ANTHROPIC_API_KEY=sk-ant-...   # from console.anthropic.com (separate from claude.ai)
 ```
 
 ---
