@@ -1,0 +1,10 @@
+# Optional dependency for --vla-mode claude  (Phase 1: Claude API high-level planner)
+# ------------------------------------------------------------------------------------
+# Install into the Isaac Sim env:
+#     /home/trooperai/isaac-env/bin/pip install -r scripts/vla/requirements-claude.txt
+#
+# Also required at runtime (not pip-installable):
+#     export ANTHROPIC_API_KEY=sk-ant-...   (from https://console.anthropic.com/settings/api-keys)
+# Note: a claude.ai subscription is separate from API access — the API needs its own key.
+
+anthropic

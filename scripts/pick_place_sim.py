@@ -89,60 +89,84 @@ _BLOCKS = {
     "green": {"color": (0.12, 0.75, 0.15), "pos": (_SHELF_X - 0.15,  0.00, _BLOCK_Z)},
     "blue":  {"color": (0.12, 0.20, 0.85), "pos": (_SHELF_X - 0.15,  0.14, _BLOCK_Z)},
 }
-_TARGET_BLOCK = "red"     # which block to pick — change to "green" or "blue"
-
-# Drop zone — robot walks backwards to this X, then releases block on floor
-_DROP_X  = 2.0
-_DROP_Y  = 1.5
+_TARGET_BLOCK = "red"     # current cube label (drives the camera HUD); set per cube at runtime
 
 # Motion parameters
 WALK_VX          = 0.8    # forward (m/s)
-WALK_VX_BACK     = -0.6   # backward (m/s) to drop zone
-WALK_WZ_DROP     = 0.0    # no turning needed
 _PICK_X          = _SHELF_X - 0.35   # robot stops here before reaching (0.35 m from shelf face)
 ARRIVE_THRESH    = 0.10
 STABILISE_FRAMES = 60
 RAMP_FRAMES      = 80     # frames to ramp arm in/out
 GRASP_FRAMES     = 40     # frames to close hand and stabilise
 RELEASE_FRAMES   = 30
+DONE_FRAMES      = 150     # stand & settle after the last cube, then close the sim
 
-# Hand body link — terminal link of left arm; used to track block during carry.
-# If G1_MINIMAL_CFG has different names, adjust this pattern.
+# REACH closed-loop servo: ease the arm to a calibrated guess, then nudge
+# shoulder pitch/roll + elbow each frame to drive the live hand onto the cube.
+# Gains use the probe-derived axis signs (probe_arm.py): +y←+roll, +z←−pitch,
+# +x←−elbow/−pitch. Small per-frame steps keep the lagging PD plant stable.
+REACH_SETTLE = 90      # frames to ease into the initial guess before servoing
+REACH_MAX    = 260     # servo timeout (frames)
+REACH_TOL    = 0.06    # hand→cube distance (m) that counts as "hugging"
+SERVO_KZ     = 0.20    # pitch step per metre of z error
+SERVO_KXP    = 0.10    # pitch step per metre of x error
+SERVO_KY     = 0.20    # roll step per metre of y error
+SERVO_KXE    = 0.40    # elbow step per metre of x error
+
+# Hand body link — terminal link of left arm; the cube is driven to follow it.
 _HAND_BODY_PATTERN = "left_two"
 
-# Arm joint targets for each motion phase.
-# REACH: arm swings forward+slightly down to shelf level.
-# LIFT:  arm pulls object up and holds close to torso.
-# LOWER: arm extends downward to release near floor.
-_REACH_JOINTS = {
-    "left_shoulder_pitch_joint":  0.55,   # forward swing ~31°
-    "left_shoulder_roll_joint":  -0.05,   # slight inward
-    "left_elbow_pitch_joint":     0.85,   # elbow bend ~49°
-    "left_wrist_pitch_joint":    -0.35,   # wrist tilts hand down toward block
-    "left_one_joint":             0.0,    # hand open
-    "left_two_joint":             0.0,
+# ── Container (open-top bin) on the shelf, to the robot's left of the blocks ──
+_BIN_X       = _SHELF_X - 0.15           # same depth as the blocks
+_BIN_Y       = 0.45                       # left end of shelf, within left-arm reach
+_BIN_INNER   = 0.24                       # inner footprint (m)
+_BIN_WALL_H  = 0.10                       # wall height (m)
+_BIN_FLOOR_Z = _SHELF_SURF_Z              # bin floor sits on the shelf surface
+
+# Order the cubes are picked in (blue/green sit left — easiest for the left arm)
+_CUBE_ORDER = ["blue", "green", "red"]
+# Where each cube is set down inside the bin (small xy spread, no stacking)
+_BIN_SLOTS  = [(-0.05, -0.04), (0.05, -0.04), (0.0, 0.05)]
+# Cube offset relative to the hand link while carried
+_HOLD_OFFSET = (0.04, 0.0, -0.04)
+
+# ── Scripted left-arm key poses (rad), calibrated to G1's REAL default pose ──
+# Only joints that exist on the model are applied; missing ones are ignored.
+# shoulder_pitch ↑ swings the arm forward/down; shoulder_roll ↑ abducts to the
+# left; elbow_pitch ↑ flexes the elbow.  (G1 has NO wrist joint.)
+_OPEN, _CLOSE = 0.0, 0.7                   # gripper finger targets (one/two)
+# Calibrated from an arm-kinematics sweep (scripts/probe_arm.py):
+#   NEGATIVE shoulder_pitch reaches forward/up; roll abducts to the left (+y);
+#   hand_y ≈ 0.09 + 0.26·roll, so to aim at cube_y: roll ≈ BASE + GAIN·cube_y.
+_REACH_ROLL_BASE = -0.35
+_REACH_ROLL_GAIN = 3.85
+_POSE_REACH = {
+    "left_shoulder_pitch_joint": -0.40,   # reach forward to the shelf (hand x≈4.38)
+    "left_shoulder_roll_joint":  _REACH_ROLL_BASE,
+    "left_shoulder_yaw_joint":   0.0,
+    "left_elbow_pitch_joint":    0.30,    # near-straight: hand out at cube height (z≈0.82)
+    "left_one_joint": _OPEN, "left_two_joint": _OPEN,
 }
-_GRASP_JOINTS = {
-    **_REACH_JOINTS,
-    "left_one_joint": 0.7,   # close hand
-    "left_two_joint": 0.7,
+_POSE_LIFT = {
+    "left_shoulder_pitch_joint": -0.80,   # raise the cube clear of the shelf (z≈0.95)
+    "left_shoulder_roll_joint":  0.20,
+    "left_elbow_pitch_joint":    0.30,
+    "left_one_joint": _CLOSE, "left_two_joint": _CLOSE,
 }
-_LIFT_JOINTS = {
-    "left_shoulder_pitch_joint":  0.15,
-    "left_shoulder_roll_joint":  -0.10,
-    "left_elbow_pitch_joint":     0.45,
-    "left_wrist_pitch_joint":    -0.10,
-    "left_one_joint":             0.7,   # keep hand closed
-    "left_two_joint":             0.7,
+_POSE_OVER_BIN = {
+    "left_shoulder_pitch_joint": -0.60,   # swing left, over the container (y≈0.45)
+    "left_shoulder_roll_joint":  1.30,
+    "left_elbow_pitch_joint":    0.40,
+    "left_one_joint": _CLOSE, "left_two_joint": _CLOSE,
 }
-_LOWER_JOINTS = {
-    "left_shoulder_pitch_joint":  0.40,
-    "left_shoulder_roll_joint":  -0.05,
-    "left_elbow_pitch_joint":     0.90,
-    "left_wrist_pitch_joint":    -0.60,
-    "left_one_joint":             0.7,   # still closed
-    "left_two_joint":             0.7,
+_POSE_LOWER = {
+    "left_shoulder_pitch_joint": -0.40,   # lower the hand down into the container
+    "left_shoulder_roll_joint":  1.30,
+    "left_elbow_pitch_joint":    0.60,
+    "left_one_joint": _CLOSE, "left_two_joint": _CLOSE,
 }
+# Joints the arm controller drives (union of all poses above)
+_CTRL_JOINTS = sorted({*_POSE_REACH, *_POSE_LIFT, *_POSE_OVER_BIN, *_POSE_LOWER})
 
 
 # ---------------------------------------------------------------------------
@@ -231,21 +255,45 @@ def build_storage_room():
     _box("/World/Room/Shelf/UpperBoard", (0.55, shelf_width, 0.04),
          (sx - 0.01, sy, 1.35), METAL)
 
-    # Ceiling light strips
-    light = sim_utils.RectLightCfg(intensity=6000.0, color=(1.0, 0.97, 0.90),
-                                    width=2.0, height=0.3)
+    # Ceiling light strips (RectLightCfg is unavailable in this Isaac Lab version —
+    # use a disk light, which has the same intensity/color API plus a radius)
+    light = sim_utils.DiskLightCfg(intensity=6000.0, color=(1.0, 0.97, 0.90),
+                                   radius=1.0)
     light.func("/World/Room/Light0", light, translation=(2.0, 0.0, _ROOM_H - 0.05))
     light.func("/World/Room/Light1", light, translation=(5.0, 0.0, _ROOM_H - 0.05))
 
     dome = sim_utils.DomeLightCfg(intensity=400.0, color=(0.85, 0.90, 1.0))
     dome.func("/World/Room/Ambient", dome)
 
-    # Drop zone marker (flat disc on floor)
-    _box("/World/Room/DropZone", (0.50, 0.50, 0.005),
-         (_DROP_X, _DROP_Y, 0.003), (0.95, 0.80, 0.15))
-
     print(f"[INFO] Storage room built  shelf face x={_SHELF_X:.2f}, "
           f"surface z={_SHELF_SURF_Z:.2f}")
+
+
+def build_container():
+    """Open-top bin on the shelf that the cubes are placed into (with collision)."""
+    BIN  = (0.30, 0.55, 0.65)
+    t    = 0.02                       # wall thickness
+    half = _BIN_INNER / 2.0
+    wz   = _BIN_FLOOR_Z + _BIN_WALL_H / 2.0
+
+    def wall(name, size, pos):
+        cfg = sim_utils.CuboidCfg(
+            size=size, visual_material=_mat(BIN),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+        )
+        cfg.func(name, cfg, translation=pos)
+
+    wall("/World/Room/Bin/Floor", (_BIN_INNER + 2*t, _BIN_INNER + 2*t, t),
+         (_BIN_X, _BIN_Y, _BIN_FLOOR_Z + t / 2))
+    wall("/World/Room/Bin/WallN", (_BIN_INNER + 2*t, t, _BIN_WALL_H),
+         (_BIN_X, _BIN_Y + half + t/2, wz))
+    wall("/World/Room/Bin/WallS", (_BIN_INNER + 2*t, t, _BIN_WALL_H),
+         (_BIN_X, _BIN_Y - half - t/2, wz))
+    wall("/World/Room/Bin/WallE", (t, _BIN_INNER, _BIN_WALL_H),
+         (_BIN_X + half + t/2, _BIN_Y, wz))
+    wall("/World/Room/Bin/WallW", (t, _BIN_INNER, _BIN_WALL_H),
+         (_BIN_X - half - t/2, _BIN_Y, wz))
+    print(f"[INFO] Container built at x={_BIN_X:.2f}, y={_BIN_Y:.2f}")
 
 
 def build_blocks() -> dict:
@@ -269,6 +317,7 @@ def build_blocks() -> dict:
 
 def design_scene() -> dict:
     build_storage_room()
+    build_container()
     blocks = build_blocks()
 
     robot_cfg           = G1_MINIMAL_CFG.copy()
@@ -284,13 +333,15 @@ def design_scene() -> dict:
     camera = None
     if _CAMERAS_ENABLED:
         camera = Camera(cfg=CameraCfg(
-            prim_path="/World/G1/torso_link/pick_cam",
+            prim_path="/World/G1/torso_link/head_cam",
             update_period=0.1,
             height=480, width=640,
             data_types=["rgb"],
             spawn=sim_utils.PinholeCameraCfg(focal_length=8.5, clipping_range=(0.1, 20.0)),
+            # G1 has no head link, so mount on torso_link but raise the z-offset to
+            # ~head/eye height for a first-person "head camera" looking forward+down.
             offset=CameraCfg.OffsetCfg(
-                pos=(0.12, 0.0, 0.20),
+                pos=(0.10, 0.0, 0.52),
                 rot=(0.7071, 0.0, 0.7071, 0.0),
                 convention="ros",
             ),
@@ -301,28 +352,13 @@ def design_scene() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Block grasp helpers
+# Cube attachment
 # ---------------------------------------------------------------------------
-
-def _set_block_kinematic(stage, block: RigidObject, kinematic: bool) -> None:
-    from pxr import UsdPhysics
-    prim   = stage.GetPrimAtPath(block.cfg.prim_path)
-    rb_api = UsdPhysics.RigidBodyAPI(prim)
-    if rb_api:
-        rb_api.GetKinematicEnabledAttr().Set(kinematic)
-
-
-def _drive_block_to_hand(robot: Articulation, block: RigidObject,
-                          hand_idx: int, grasp_offset: torch.Tensor,
-                          device: str) -> None:
-    """Each frame while holding: teleport block to follow the hand link."""
-    hand_pos = robot.data.body_pos_w[0, hand_idx]            # (3,)
-    block_pos = hand_pos + grasp_offset
-    pose = torch.zeros(1, 7, device=device)
-    pose[0, :3] = block_pos
-    pose[0, 3]  = 1.0   # quaternion w=1 (identity — keep block upright)
-    block.write_root_pose_to_sim(pose)
-    block.write_data_to_sim()
+# The cube is never switched to kinematic (the direct-GPU pipeline forbids the
+# dynamic↔kinematic flip at runtime). Instead, while held, the cube's pose is
+# driven each frame and its velocity zeroed (done inline in run_simulator), so a
+# still-dynamic body rides with the hand; on release we stop driving it and it
+# settles in the bin under gravity.
 
 
 # ---------------------------------------------------------------------------
@@ -466,12 +502,11 @@ def _show_preview(rgb_np: np.ndarray, phase: str) -> None:
     status_map = {
         "walk": "WALKING TO SHELF",
         "arrive": "STABILISING",
-        "reach": "REACHING FOR BLOCK",
+        "reach": "REACHING FOR CUBE",
         "grasp": "GRASPING",
         "lift": "LIFTING",
-        "walk_back": "CARRYING TO DROP",
-        "drop_arrive": "AT DROP ZONE",
-        "lower": "LOWERING BLOCK",
+        "over_bin": "MOVING TO BIN",
+        "lower": "LOWERING INTO BIN",
         "release": "RELEASING",
         "done": "DONE",
     }
@@ -505,7 +540,7 @@ def _check_contact(sensor: ContactSensor, phase: str) -> None:
     if _contact_cooldown > 0:
         _contact_cooldown -= 1
         return
-    if phase not in ("reach", "grasp", "lift", "lower", "release"):
+    if phase not in ("reach", "grasp", "lift", "over_bin", "lower", "release"):
         return
     if not sensor.is_initialized:
         return
@@ -534,12 +569,15 @@ def _build_arm_pose(robot: Articulation, joint_dict: dict) -> torch.Tensor:
     return pose
 
 
+def _smoothstep(t: float) -> float:
+    """Ease-in/out blend factor (zero velocity at both ends) for smooth motion."""
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module,
                   blocks: dict, sim_dt: float,
                   contact_sensor: ContactSensor, camera=None) -> None:
-    import isaaclab.sim as sim_utils_inner  # already imported — for get_current_stage
-    stage = sim_utils_inner.get_current_stage()
-
     device       = sim.device
     n2i          = {name: i for i, name in enumerate(robot.joint_names)}
     default_jpos = robot.data.default_joint_pos.clone()
@@ -555,38 +593,77 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
         print(f"[WARN] Could not find hand link '{_HAND_BODY_PATTERN}'. "
               f"Body names: {robot.body_names[:10]}...")
 
-    # Build arm pose tensors for each motion phase
-    reach_jpos   = _build_arm_pose(robot, _REACH_JOINTS)
-    grasp_jpos   = _build_arm_pose(robot, _GRASP_JOINTS)
-    lift_jpos    = _build_arm_pose(robot, _LIFT_JOINTS)
-    lower_jpos   = _build_arm_pose(robot, _LOWER_JOINTS)
+    global _TARGET_BLOCK
 
-    target_block = blocks[_TARGET_BLOCK]
+    # Shared arm key poses (full 37-dim joint-target tensors)
+    lift_pose  = _build_arm_pose(robot, _POSE_LIFT)
+    over_pose  = _build_arm_pose(robot, _POSE_OVER_BIN)
+    lower_pose = _build_arm_pose(robot, _POSE_LOWER)
+
+    hold_offset = torch.tensor(_HOLD_OFFSET, device=device)
+    cubes       = [blocks[c] for c in _CUBE_ORDER]
+
+    # Reach-servo joint limits (clamp the nudged targets to what the joints allow)
+    _jl = robot.data.soft_joint_pos_limits[0]
+    def _lim(j):
+        return (_jl[n2i[j], 0].item(), _jl[n2i[j], 1].item()) if j in n2i else (-3.0, 3.0)
+    pitch_lim = _lim("left_shoulder_pitch_joint")
+    roll_lim  = _lim("left_shoulder_roll_joint")
+    elbow_lim = _lim("left_elbow_pitch_joint")
+
+    def clamp(v, lim):
+        return min(max(v, lim[0]), lim[1])
+
+    def servo_reach_pose() -> torch.Tensor:
+        return _build_arm_pose(robot, {
+            "left_shoulder_pitch_joint": reach_pitch,
+            "left_shoulder_roll_joint":  reach_roll,
+            "left_shoulder_yaw_joint":   0.0,
+            "left_elbow_pitch_joint":    reach_elbow,
+            "left_one_joint": _OPEN, "left_two_joint": _OPEN,
+        })
 
     # Velocity commands
-    walk_fwd  = torch.tensor([WALK_VX,      0.0, 0.0], device=device)
-    walk_back = torch.tensor([WALK_VX_BACK, 0.0, 0.0], device=device)
-    stop_cmd  = torch.zeros(3, device=device)
-    cmd       = walk_fwd.clone()
-
+    walk_fwd = torch.tensor([WALK_VX, 0.0, 0.0], device=device)
+    stop_cmd = torch.zeros(3, device=device)
+    cmd      = walk_fwd.clone()
     last_action = torch.zeros(1, _ACTION_DIM, device=device)
 
-    phase          = "walk"
-    frame          = 0
-    holding_block  = False
-    grasp_offset   = torch.zeros(3, device=device)  # hand→block offset at grasp moment
+    # State
+    phase     = "walk"
+    frame     = 0
+    cube_idx  = 0
+    holding   = False
 
-    # --- Per-arm-phase target pose (used to build action override) ---
-    arm_target_jpos = default_jpos  # updated at each phase transition
+    # Arm-blend state: smoothstep from `pose_from` → `pose_to` over `blend_n` frames
+    cur_pose  = default_jpos.clone()
+    pose_from = default_jpos.clone()
+    pose_to   = default_jpos.clone()
+    blend_n   = RAMP_FRAMES
 
-    print(f"\n[INFO] Pick target: {_TARGET_BLOCK.upper()} block | "
-          f"Shelf x={_SHELF_X:.1f} | Stop at x={_PICK_X:.1f}")
-    print(f"[INFO] WALK → ARRIVE → REACH → GRASP → LIFT → "
-          f"WALK_BACK → DROP_ARRIVE → LOWER → RELEASE → DONE\n")
+    # Cube-driving anchors (world positions captured at phase entry)
+    grasp_start = torch.zeros(3, device=device)
+    lower_start = torch.zeros(3, device=device)
+    bin_target  = torch.zeros(3, device=device)
+
+    # Reach-servo state (commanded arm angles, refined each frame from hand error)
+    reach_pitch = _POSE_REACH["left_shoulder_pitch_joint"]
+    reach_roll  = _REACH_ROLL_BASE
+    reach_elbow = _POSE_REACH["left_elbow_pitch_joint"]
+    reach_hold  = 0
+    reach_err   = 9.9
+
+    def cube_y_of(idx: int) -> float:
+        return cubes[idx].data.root_pos_w[0, 1].item()
+
+    print(f"\n[INFO] Placing {len(cubes)} cubes ({', '.join(_CUBE_ORDER)}) into the bin "
+          f"at x={_BIN_X:.2f}, y={_BIN_Y:.2f} | Stop at x={_PICK_X:.1f}")
+    print("[INFO] WALK → ARRIVE → [REACH → GRASP → LIFT → OVER_BIN → LOWER → RELEASE] ×"
+          f"{len(cubes)} → DONE\n")
 
     while simulation_app.is_running():
         robot_x = robot.data.root_pos_w[0, 0].item()
-        robot_y = robot.data.root_pos_w[0, 1].item()
+        active  = cubes[cube_idx] if cube_idx < len(cubes) else None
 
         # ── State machine ────────────────────────────────────────────────────
         if phase == "walk":
@@ -599,80 +676,126 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
             cmd    = stop_cmd
             frame += 1
             if frame >= STABILISE_FRAMES:
-                arm_target_jpos = reach_jpos
-                print("[ARRIVE→REACH] extending arm toward block")
-                phase = "reach"; frame = 0
+                _TARGET_BLOCK = _CUBE_ORDER[cube_idx]
+                pose_from = cur_pose.clone()
+                reach_pitch = _POSE_REACH["left_shoulder_pitch_joint"]
+                reach_roll  = _REACH_ROLL_BASE + cube_y_of(cube_idx) * _REACH_ROLL_GAIN
+                reach_elbow = _POSE_REACH["left_elbow_pitch_joint"]
+                reach_hold  = 0; frame = 0
+                print(f"[ARRIVE→REACH] cube {cube_idx+1}/{len(cubes)} ({_CUBE_ORDER[cube_idx]})")
+                phase = "reach"
 
         elif phase == "reach":
             cmd    = stop_cmd
             frame += 1
-            if frame >= RAMP_FRAMES:
-                arm_target_jpos = grasp_jpos
-                print("[REACH→GRASP] closing hand")
-                phase = "grasp"; frame = 0
+            # After easing into the initial guess, servo the hand onto the cube.
+            if frame > REACH_SETTLE and hand_idx is not None:
+                hp = robot.data.body_pos_w[0, hand_idx]
+                cp = active.data.root_pos_w[0, :3]
+                ex = (cp[0] - hp[0]).item()
+                ey = (cp[1] - hp[1]).item()
+                ez = (cp[2] - hp[2]).item()
+                reach_pitch = clamp(reach_pitch - SERVO_KZ * ez - SERVO_KXP * ex, pitch_lim)
+                reach_roll  = clamp(reach_roll  + SERVO_KY  * ey,                 roll_lim)
+                reach_elbow = clamp(reach_elbow - SERVO_KXE * ex,                 elbow_lim)
+                reach_err   = (ex*ex + ey*ey + ez*ez) ** 0.5
+                reach_hold  = reach_hold + 1 if reach_err < REACH_TOL else 0
+            if reach_hold >= 8 or frame >= REACH_MAX:
+                grasp_pose = {
+                    "left_shoulder_pitch_joint": reach_pitch,
+                    "left_shoulder_roll_joint":  reach_roll,
+                    "left_shoulder_yaw_joint":   0.0,
+                    "left_elbow_pitch_joint":    reach_elbow,
+                    "left_one_joint": _CLOSE, "left_two_joint": _CLOSE,
+                }
+                pose_from = cur_pose.clone(); pose_to = _build_arm_pose(robot, grasp_pose)
+                blend_n = GRASP_FRAMES; frame = 0
+                grasp_start = active.data.root_pos_w[0, :3].clone()
+                holding = True
+                print(f"[REACH→GRASP] hand on cube | gap={reach_err:.2f}m "
+                      f"({'converged' if reach_hold >= 8 else 'timeout'})")
+                phase = "grasp"
 
         elif phase == "grasp":
             cmd    = stop_cmd
             frame += 1
-            if frame == GRASP_FRAMES // 2:
-                # Attach block: switch to kinematic + compute grasp offset
-                _set_block_kinematic(stage, target_block, True)
-                holding_block = True
-                if hand_idx is not None:
-                    hand_pos = robot.data.body_pos_w[0, hand_idx]
-                    block_pos = target_block.data.root_pos_w[0, :3]
-                    grasp_offset = block_pos - hand_pos
-                    grasp_offset[2] = max(grasp_offset[2], -0.12)  # clamp vertical offset
-                print(f"[GRASP] Block attached — grasp offset {grasp_offset.tolist()}")
             if frame >= GRASP_FRAMES:
-                arm_target_jpos = lift_jpos
-                print("[GRASP→LIFT] lifting block")
-                phase = "lift"; frame = 0
+                pose_from = cur_pose.clone(); pose_to = lift_pose
+                blend_n = RAMP_FRAMES; frame = 0
+                print("[GRASP→LIFT] lifting cube")
+                phase = "lift"
 
         elif phase == "lift":
             cmd    = stop_cmd
             frame += 1
             if frame >= RAMP_FRAMES:
-                cmd = walk_back
-                print(f"[LIFT→WALK_BACK] carrying block to drop zone x={_DROP_X:.1f}")
-                phase = "walk_back"; frame = 0
+                pose_from = cur_pose.clone(); pose_to = over_pose
+                blend_n = RAMP_FRAMES; frame = 0
+                print("[LIFT→OVER_BIN] moving over the container")
+                phase = "over_bin"
 
-        elif phase == "walk_back":
-            cmd = walk_back
-            if robot_x <= _DROP_X + ARRIVE_THRESH:
-                cmd   = stop_cmd
-                print(f"[WALK_BACK→DROP_ARRIVE] x={robot_x:.2f}")
-                phase = "drop_arrive"; frame = 0
-
-        elif phase == "drop_arrive":
+        elif phase == "over_bin":
             cmd    = stop_cmd
             frame += 1
-            if frame >= STABILISE_FRAMES:
-                arm_target_jpos = lower_jpos
-                print("[DROP_ARRIVE→LOWER] lowering block to release")
-                phase = "lower"; frame = 0
+            if frame >= RAMP_FRAMES:
+                pose_from = cur_pose.clone(); pose_to = lower_pose
+                blend_n = RAMP_FRAMES; frame = 0
+                lower_start = active.data.root_pos_w[0, :3].clone()
+                sx, sy = _BIN_SLOTS[cube_idx % len(_BIN_SLOTS)]
+                bin_target = torch.tensor(
+                    [_BIN_X + sx, _BIN_Y + sy, _BIN_FLOOR_Z + _BLOCK_H / 2 + 0.01],
+                    device=device)
+                print("[OVER_BIN→LOWER] lowering cube into the container")
+                phase = "lower"
 
         elif phase == "lower":
             cmd    = stop_cmd
             frame += 1
             if frame >= RAMP_FRAMES:
+                holding = False   # cube now resting at bin_target; let it settle
                 print("[LOWER→RELEASE] opening hand")
                 phase = "release"; frame = 0
 
         elif phase == "release":
             cmd    = stop_cmd
             frame += 1
-            if frame == RELEASE_FRAMES // 2:
-                # Detach block: switch back to dynamic
-                _set_block_kinematic(stage, target_block, False)
-                holding_block = False
-                print(f"[RELEASE] Block released — it will fall to floor")
             if frame >= RELEASE_FRAMES:
-                arm_target_jpos = default_jpos
-                print("[RELEASE→DONE] task complete — robot standing")
-                phase = "done"
+                print(f"[RELEASE] {_CUBE_ORDER[cube_idx].upper()} cube placed in bin")
+                cube_idx += 1
+                if cube_idx < len(cubes):
+                    _TARGET_BLOCK = _CUBE_ORDER[cube_idx]
+                    pose_from = cur_pose.clone()
+                    reach_pitch = _POSE_REACH["left_shoulder_pitch_joint"]
+                    reach_roll  = _REACH_ROLL_BASE + cube_y_of(cube_idx) * _REACH_ROLL_GAIN
+                    reach_elbow = _POSE_REACH["left_elbow_pitch_joint"]
+                    reach_hold  = 0; frame = 0
+                    print(f"[RELEASE→REACH] next cube {cube_idx+1}/{len(cubes)} "
+                          f"({_CUBE_ORDER[cube_idx]})")
+                    phase = "reach"
+                else:
+                    pose_from = cur_pose.clone(); pose_to = default_jpos
+                    blend_n = RAMP_FRAMES; frame = 0
+                    print("[RELEASE→DONE] all cubes placed — robot standing")
+                    # Verification summary: robot upright? cubes inside the bin?
+                    rz = robot.data.root_pos_w[0, 2].item()
+                    print(f"[CHECK] robot base height z={rz:.2f} m "
+                          f"({'UPRIGHT' if rz > 0.5 else 'FALLEN'})")
+                    half = _BIN_INNER / 2.0
+                    for lbl in _CUBE_ORDER:
+                        p = blocks[lbl].data.root_pos_w[0, :3].tolist()
+                        inside = (abs(p[0] - _BIN_X) < half + 0.04 and
+                                  abs(p[1] - _BIN_Y) < half + 0.04)
+                        print(f"[CHECK] {lbl:>5} cube at "
+                              f"({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}) "
+                              f"{'IN BIN' if inside else 'OUT'}")
+                    phase = "done"
 
-        # phase "done" — robot stands under policy with zero command
+        elif phase == "done":
+            cmd    = stop_cmd
+            frame += 1   # let the arm ease back to its home pose, then exit
+            if frame >= DONE_FRAMES:
+                print("[DONE] closing simulation")
+                break
 
         # ── Policy inference ─────────────────────────────────────────────────
         with torch.inference_mode():
@@ -681,38 +804,49 @@ def run_simulator(sim: SimulationContext, robot: Articulation, policy: nn.Module
         action      = action.clone()
         last_action = action.clone()
 
-        # ── Arm override (all non-walk phases) ───────────────────────────────
-        if phase in ("reach", "grasp", "lift", "lower", "release"):
-            alpha = min(frame / max(RAMP_FRAMES, 1), 1.0)
-            interp = torch.lerp(default_jpos, arm_target_jpos, alpha)
-        elif phase in ("walk_back", "drop_arrive", "done") and holding_block:
-            interp = lift_jpos   # keep arm raised while carrying
-            alpha  = 1.0
-        else:
-            alpha  = 0.0
-            interp = default_jpos
-
-        if alpha > 0.0:
-            for jname in {**_REACH_JOINTS, **_LIFT_JOINTS, **_LOWER_JOINTS}:
+        # ── Arm override (manipulation phases) ────────────────────────────────
+        if phase == "reach":
+            # Ease into the servo target (which is itself nudged toward the cube).
+            a        = _smoothstep(frame / max(REACH_SETTLE, 1))
+            cur_pose = torch.lerp(pose_from, servo_reach_pose(), a)
+        elif phase in ("grasp", "lift", "over_bin", "lower", "release", "done"):
+            a        = _smoothstep(frame / max(blend_n, 1))
+            cur_pose = torch.lerp(pose_from, pose_to, a)
+        if phase in ("reach", "grasp", "lift", "over_bin", "lower", "release", "done"):
+            for jname in _CTRL_JOINTS:
                 idx = n2i.get(jname)
                 if idx is not None:
-                    action[0, idx] = (interp[0, idx] - default_jpos[0, idx]) / _ACTION_SCALE
+                    action[0, idx] = (cur_pose[0, idx] - default_jpos[0, idx]) / _ACTION_SCALE
 
         # ── Apply to robot ────────────────────────────────────────────────────
         joint_targets = default_jpos + _ACTION_SCALE * action
         robot.set_joint_position_target(joint_targets)
         robot.write_data_to_sim()
 
-        # ── Drive block ───────────────────────────────────────────────────────
-        if holding_block and hand_idx is not None:
-            _drive_block_to_hand(robot, target_block, hand_idx, grasp_offset, device)
+        # ── Drive the held cube ───────────────────────────────────────────────
+        if holding and active is not None and hand_idx is not None:
+            hand = robot.data.body_pos_w[0, hand_idx]
+            if phase == "grasp":            # smoothly draw the cube into the hand
+                tgt = torch.lerp(grasp_start, hand + hold_offset,
+                                 _smoothstep(frame / max(GRASP_FRAMES, 1)))
+            elif phase in ("lift", "over_bin"):   # cube rides with the hand
+                tgt = hand + hold_offset
+            elif phase == "lower":          # smoothly set it down into the bin
+                tgt = torch.lerp(lower_start, bin_target,
+                                 _smoothstep(frame / max(RAMP_FRAMES, 1)))
+            else:
+                tgt = active.data.root_pos_w[0, :3]
+            pose7 = torch.zeros(1, 7, device=device)
+            pose7[0, :3] = tgt
+            pose7[0, 3]  = 1.0
+            active.write_root_pose_to_sim(pose7)
+            active.write_root_velocity_to_sim(torch.zeros(1, 6, device=device))
+            active.write_data_to_sim()
 
         sim.step()
         robot.update(sim_dt)
-        target_block.update(sim_dt)
-        for lbl, blk in blocks.items():
-            if lbl != _TARGET_BLOCK:
-                blk.update(sim_dt)
+        for blk in blocks.values():
+            blk.update(sim_dt)
 
         contact_sensor.update(sim_dt)
         _check_contact(contact_sensor, phase)

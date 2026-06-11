@@ -1,0 +1,41 @@
+# Optional dependencies for --vla-mode groot  (NVIDIA GR00T N1.7-3B backend)
+# ---------------------------------------------------------------------------
+# Install into the Isaac Sim env, NOT a fresh venv:
+#     /home/trooperai/isaac-env/bin/pip install -r scripts/vla/requirements-groot.txt
+#
+# This list is the NON-CONFLICTING subset of Isaac-GR00T's own pyproject.toml.
+# torch / torchvision / transformers / numpy / opencv are INTENTIONALLY OMITTED:
+# Isaac Sim already pins specific versions of those, and reinstalling GR00T's
+# pins (torch==2.7.1, transformers==4.57.3, numpy==1.26.4, ...) would risk
+# breaking the simulator. Let Isaac Sim own the heavy ML/vision stack.
+#
+# Two more steps that pip CANNOT do (see README "Installation"):
+#   1. Clone the repo:   git clone --recurse-submodules \
+#                          https://github.com/NVIDIA/Isaac-GR00T /home/trooperai/Isaac-GR00T
+#   2. Put it on the path (instead of `pip install -e`):
+#        echo "/home/trooperai/Isaac-GR00T" > \
+#          /home/trooperai/isaac-env/lib/python3.10/site-packages/groot.pth
+#
+# Verify:  /home/trooperai/isaac-env/bin/python -c "from gr00t.policy import Gr00tPolicy; print('gr00t OK')"
+
+tyro==0.9.17
+typeguard==3.0.2
+dm-tree
+albumentations==1.4.18
+av==16.1.0
+diffusers==0.35.1
+lmdb==1.7.5
+msgpack==1.1.0
+msgpack-numpy==0.4.8
+pandas==2.2.3
+peft==0.17.1
+termcolor==3.2.0
+click==8.1.8
+einops==0.8.1
+jsonlines==4.0.0
+omegaconf==2.3.0
+scipy==1.15.3
+pyzmq==27.0.1
+gymnasium==1.2.2
+gitpython==3.1.46
+boto3
